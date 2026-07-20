@@ -1,0 +1,18 @@
+{
+  "lastChangelogVersion": "0.80.10",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "medium",
+  "hideThinkingBlock": false,
+  "theme": "catppuccin-mocha",
+  "packages": [
+    "npm:pi-token-speed",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    {
+      "source": "npm:pi-mcp-adapter",
+      "extensions": []
+    },
+    "npm:pi-web-access"
+  ],
+  "quietStartup": false
+}

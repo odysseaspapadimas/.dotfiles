@@ -1,0 +1,7 @@
+{
+  "app.model.select": [],
+  "app.session.resume": [],
+  "app.session.new": [],
+  "app.thinking.cycle": ["ctrl+t"],
+  "app.thinking.toggle": []
+}

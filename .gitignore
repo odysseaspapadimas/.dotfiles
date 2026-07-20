@@ -1,0 +1,15 @@
+.DS_Store
+*~
+*.swp
+
+# Never track Pi credentials, conversations, generated state, or package caches
+**/auth.json
+**/mcp.json
+**/mcp-oauth/
+**/sessions/
+**/npm/
+**/codex-review-reports/
+**/web-search.json
+**/mcp-cache.json
+**/models-store.json
+**/skill-toggle.json
