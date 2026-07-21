@@ -1,7 +1,8 @@
 /**
  * OpenAI Codex Quota Extension for Pi
  *
- * Shows ChatGPT/Codex usage for the `openai-codex` provider in Pi's footer.
+ * Shows the currently reported ChatGPT/Codex usage windows for the
+ * `openai-codex` provider in Pi's footer.
  * Uses the same private endpoint the Codex web UI/tools use:
  *   https://chatgpt.com/backend-api/wham/usage
  *
@@ -113,19 +114,31 @@ function readCodexConfig(): CodexAuthConfig | null {
 	return null;
 }
 
-function normalizeWindow(raw: unknown, label: string): UsageWindow | undefined {
+function windowLabel(windowSeconds: number, fallback: string): string {
+	if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) return fallback;
+	const days = windowSeconds / 86400;
+	if (Number.isInteger(days)) return `${days}d`;
+	const hours = windowSeconds / 3600;
+	if (Number.isInteger(hours)) return `${hours}h`;
+	const minutes = windowSeconds / 60;
+	if (Number.isInteger(minutes)) return `${minutes}m`;
+	return fallback;
+}
+
+function normalizeWindow(raw: unknown, fallbackLabel: string): UsageWindow | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const obj = raw as Record<string, unknown>;
 	const used = Number(obj.used_percent ?? obj.usedPercent);
 	const resetAt = Number(obj.reset_at ?? obj.resetAt);
-	const windowSeconds = Number(obj.limit_window_seconds ?? obj.windowDurationSeconds ?? obj.window_seconds);
+	const rawWindowSeconds = Number(obj.limit_window_seconds ?? obj.windowDurationSeconds ?? obj.window_seconds);
 	if (!Number.isFinite(used) || !Number.isFinite(resetAt)) return undefined;
+	const windowSeconds = Number.isFinite(rawWindowSeconds) ? rawWindowSeconds : 0;
 	return {
 		usedPercent: Math.max(0, used),
 		leftPercent: Math.max(0, 100 - used),
 		resetAt,
-		windowSeconds: Number.isFinite(windowSeconds) ? windowSeconds : 0,
-		label,
+		windowSeconds,
+		label: windowLabel(windowSeconds, fallbackLabel),
 	};
 }
 
@@ -138,8 +151,8 @@ function normalizeUsage(raw: unknown, auth: CodexAuthConfig): CodexUsageResult {
 	return {
 		success: true,
 		planType: typeof obj.plan_type === "string" ? obj.plan_type : undefined,
-		primary: normalizeWindow(rateLimit.primary_window, "5h"),
-		secondary: normalizeWindow(rateLimit.secondary_window, "1w"),
+		primary: normalizeWindow(rateLimit.primary_window, "primary"),
+		secondary: normalizeWindow(rateLimit.secondary_window, "secondary"),
 		codeReview: normalizeWindow(codeReview.primary_window, "review"),
 		credits: credits ? {
 			hasCredits: typeof credits.has_credits === "boolean" ? credits.has_credits : undefined,
@@ -327,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => deactivate());
 
 	pi.registerCommand("codex-quota", {
-		description: "Show OpenAI Codex 5h/weekly quota usage",
+		description: "Show the current OpenAI Codex quota window",
 		handler: async (args, ctx) => {
 			const mode = args.trim().toLowerCase();
 			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "Codex fetching..."));
