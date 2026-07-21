@@ -1,0 +1,42 @@
+onboarding = false
+
+[keys]
+prefix = "ctrl+space"
+
+[ui]
+agent_panel_sort = "spaces"
+show_agent_labels_on_pane_borders = false
+
+[ui.toast]
+delivery = "terminal"
+delay_seconds = 1
+
+[experimental]
+pane_history = false
+switch_ascii_input_source_in_prefix = false
+
+[[keys.command]]
+key = "prefix+o"
+type = "popup"
+command = "ports"
+width = "82%"
+height = "82%"
+description = "development ports"
+
+[[keys.command]]
+key = "prefix+shift+e"
+type = "plugin_action"
+command = "edi.layout-tools.equalize"
+description = "equalize pane splits"
+
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "edi.layout-tools.reshape-main-left"
+description = "focused pane main-left"
+
+[[keys.command]]
+key = "prefix+shift+m"
+type = "plugin_action"
+command = "edi.layout-tools.reshape-main-grid"
+description = "focused pane main-left with grid"
