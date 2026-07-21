@@ -34,11 +34,15 @@ const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   i: { label: "login", command: "/login", preserveDraft: true },
   b: { label: "side chat", command: "/side", preserveDraft: true },
   d: { label: "diff", command: "/diff", preserveDraft: true },
+  p: { label: "scratch", command: "/scratch", preserveDraft: true },
+  z: { label: "restore files", command: "/restore", preserveDraft: true },
+  j: { label: "side summary", command: "/side:inject summary", preserveDraft: true },
+  "shift+j": { label: "side full handoff", command: "/side:inject raw", preserveDraft: true },
 };
 
 function getChord(data: string): LeaderCommand | undefined {
   for (const [key, command] of Object.entries(LEADER_COMMANDS)) {
-    if (matchesKey(data, key)) return command;
+    if (matchesKey(data, key as Parameters<typeof matchesKey>[1])) return command;
   }
   return undefined;
 }
@@ -55,7 +59,8 @@ function buildHelpLines(theme: Theme, width: number): string[] {
   const rows = [
     `${theme.fg("muted", "Session ")} ${item("n", "new")}  ${item("l/u", "resume")}  ${item("t", "tree")}`,
     `${theme.fg("muted", "Pi      ")} ${item("m", "model")}  ${item("s", "settings")}  ${item("r", "reload")}`,
-    `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("d", "diff")}  ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
+    `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("d", "diff")}  ${item("p", "scratch")}  ${item("z", "restore")}  ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
+    `${theme.fg("muted", "Side    ")} ${item("j", "summary handoff")}  ${item("J", "full handoff")}`,
     `${theme.fg("muted", "Help    ")} ${item("?", "show this window")}  ${label("Esc/Enter closes")}`,
   ];
 

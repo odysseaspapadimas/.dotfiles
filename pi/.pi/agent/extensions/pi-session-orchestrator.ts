@@ -14,6 +14,11 @@ const TOOL_NAME = "pi_sessions";
 const METADATA_TYPE = "pi-session-orchestrator";
 const LEGACY_REGISTRY_PATH = join(getAgentDir(), "pi-session-orchestrator", "registry.json");
 const WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID;
+const SIDE_SOURCE_SESSION = process.env.PI_HERDR_SIDE_SOURCE;
+const SIDE_PARENT_PANE = process.env.PI_HERDR_SIDE_PARENT_PANE;
+
+const SessionLifecycle = StringEnum(["persistent", "task"] as const);
+const ThinkingLevel = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
 
 const Action = StringEnum([
   "create",
@@ -49,9 +54,12 @@ interface OrchestratorMetadata {
   initialProvider?: string;
   initialModel?: string;
   initialThinking?: string;
+  lifecycle?: "persistent" | "task";
   // Legacy metadata included name. It is deliberately ignored: session_info is authoritative.
   name?: string;
 }
+
+type SessionOrigin = "created" | "discovered" | "historical";
 
 interface ManagedSession {
   id: string;
@@ -64,6 +72,9 @@ interface ManagedSession {
   provider?: string;
   model?: string;
   thinking?: string;
+  lifecycle: "persistent" | "task";
+  origin: SessionOrigin;
+  orchestrated: boolean;
 }
 
 interface HerdrAgentSession {
@@ -107,6 +118,10 @@ interface ToolParams {
   cwd?: string;
   timeoutSeconds?: number;
   limit?: number;
+  lifecycle?: "persistent" | "task";
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  createdAfter?: string;
+  updatedAfter?: string;
 }
 
 interface LegacySession {
@@ -143,6 +158,19 @@ function textContent(content: unknown): string {
     .map((part) => part.text)
     .join("\n")
     .trim();
+}
+
+function parseDateFilter(value: string | undefined, field: string): number | undefined {
+  if (!value?.trim()) return undefined;
+  const input = value.trim().toLocaleLowerCase();
+  const relative = input.match(/^(\d+)\s*(m|h|d|w)(?:\s+ago)?$/u);
+  if (relative) {
+    const units = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 } as const;
+    return Date.now() - Number(relative[1]) * units[relative[2] as keyof typeof units];
+  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) throw new Error(`${field} must be an ISO date/time or relative duration such as 3d or 2w`);
+  return parsed;
 }
 
 function formatAge(timestamp: number): string {
@@ -188,22 +216,25 @@ function managedFromInfo(info: SessionInfo): ManagedSession | undefined {
     const manager = SessionManager.open(info.path);
     const metadata = metadataFor(manager);
     const header = manager.getHeader();
-    if (!metadata || !header) return undefined;
+    if (!header) return undefined;
     const context = manager.buildSessionContext();
-    const thinkingEntry = manager
-      .getBranch()
-      .findLast((entry) => entry.type === "thinking_level_change");
+    const thinkingEntry = manager.getBranch().findLast((entry) => entry.type === "thinking_level_change");
+    const createdAt = metadata?.createdAt ?? new Date(header.timestamp).getTime();
+    const fallbackName = `${info.cwd || header.cwd || "Pi session"} · ${new Date(createdAt).toLocaleString()}`;
     return {
-      id: metadata.id,
-      name: manager.getSessionName() || info.name || metadata.name || metadata.id,
+      id: metadata?.id ?? header.id,
+      name: manager.getSessionName() || info.name || metadata?.name || fallbackName,
       sessionPath: info.path,
       sessionId: header.id,
       cwd: header.cwd || info.cwd,
-      createdAt: metadata.createdAt ?? new Date(header.timestamp).getTime(),
+      createdAt,
       updatedAt: info.modified.getTime(),
-      provider: context.model?.provider ?? metadata.initialProvider,
-      model: context.model?.modelId ?? metadata.initialModel,
-      thinking: thinkingEntry?.thinkingLevel ?? metadata.initialThinking,
+      provider: context.model?.provider ?? metadata?.initialProvider,
+      model: context.model?.modelId ?? metadata?.initialModel,
+      thinking: thinkingEntry?.thinkingLevel ?? metadata?.initialThinking,
+      lifecycle: metadata?.lifecycle === "task" ? "task" : "persistent",
+      origin: metadata ? "created" : "historical",
+      orchestrated: Boolean(metadata),
     };
   } catch {
     return undefined;
@@ -242,6 +273,11 @@ function sessionArgument(processInfo: HerdrProcessInfo | undefined): string | un
 
 export default function piSessionOrchestrator(pi: ExtensionAPI) {
   let migrationPromise: Promise<void> | undefined;
+  let currentSessionPath: string | undefined;
+
+  pi.on("session_start", (_event, ctx) => {
+    currentSessionPath = ctx.sessionManager.getSessionFile();
+  });
 
   async function herdr(args: string[], signal?: AbortSignal): Promise<HerdrResponse> {
     const result = await pi.exec("herdr", args, { timeout: 30_000, signal });
@@ -321,28 +357,67 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
   async function discoverSessions(): Promise<ManagedSession[]> {
     await ensureMigrated();
     const infos = await SessionManager.listAll();
-    const sessions = infos.map(managedFromInfo).filter((session): session is ManagedSession => !!session);
-    sessions.sort((a, b) => b.createdAt - a.createdAt);
-    return sessions;
+    const byIdentity = new Map<string, ManagedSession>();
+    for (const info of infos) {
+      const session = managedFromInfo(info);
+      if (!session) continue;
+      const key = `${session.sessionId}\0${await canonicalPath(session.sessionPath)}`;
+      const previous = byIdentity.get(key);
+      if (!previous || session.updatedAt > previous.updatedAt) byIdentity.set(key, session);
+    }
+    return [...byIdentity.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  function ambiguous(needle: string, candidates: ManagedSession[]): never {
+    const rows = candidates.slice(0, 12).map((session) =>
+      `${session.id}  ${session.name}  ${session.cwd}  updated ${new Date(session.updatedAt).toISOString()}`,
+    );
+    throw new Error(`Ambiguous Pi session query: ${needle}\n${rows.join("\n")}`);
   }
 
   async function resolveSession(idOrName: string | undefined): Promise<ManagedSession> {
-    if (!idOrName?.trim()) throw new Error("This action requires id");
+    if (!idOrName?.trim()) throw new Error("This action requires a session ID, prefix, path, pane ID, or name");
     const needle = idOrName.trim();
+    const folded = needle.toLocaleLowerCase();
     const sessions = await discoverSessions();
+    const runtimeIndex = await discoverRuntimes();
 
-    const exactId = sessions.filter((session) => session.id === needle);
-    if (exactId.length === 1) return exactId[0];
-    if (exactId.length > 1) throw new Error(`Duplicate orchestrated session ID: ${needle}`);
+    if (needle === "current" || needle === "self" || (needle === "main" && !SIDE_SOURCE_SESSION)) {
+      const current = sessions.filter((session) => currentSessionPath && resolve(session.sessionPath) === resolve(currentSessionPath));
+      if (current.length === 1) return current[0];
+      throw new Error("The current Pi session is not persistent or could not be discovered");
+    }
+    if ((needle === "main" || needle === "parent") && SIDE_SOURCE_SESSION) {
+      const source = sessions.filter((session) => resolve(session.sessionPath) === resolve(SIDE_SOURCE_SESSION));
+      if (source.length === 1) return source[0];
+      throw new Error("The side chat's source session is unavailable");
+    }
 
-    const exactName = sessions.filter((session) => session.name === needle);
-    if (exactName.length === 1) return exactName[0];
-    if (exactName.length > 1) throw new Error(`Ambiguous orchestrated session name: ${needle}`);
+    const runtimeNeedle = needle === "parent" && SIDE_PARENT_PANE ? SIDE_PARENT_PANE : needle;
+    const paneMatches: ManagedSession[] = [];
+    for (const session of sessions) {
+      const panes = await runtimesFor(session, undefined, runtimeIndex);
+      if (panes.some((pane) => pane.pane_id === runtimeNeedle)) paneMatches.push(session);
+    }
+    if (paneMatches.length === 1) return paneMatches[0];
+    if (paneMatches.length > 1) ambiguous(needle, paneMatches);
 
-    const prefixes = sessions.filter((session) => session.id.startsWith(needle));
+    const exact = sessions.filter((session) =>
+      session.id === needle || session.sessionId === needle || session.sessionPath === needle || session.name.toLocaleLowerCase() === folded,
+    );
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) ambiguous(needle, exact);
+
+    const prefixes = sessions.filter((session) => session.id.startsWith(needle) || session.sessionId.startsWith(needle));
     if (prefixes.length === 1) return prefixes[0];
-    if (prefixes.length > 1) throw new Error(`Ambiguous session ID prefix: ${needle}`);
-    throw new Error(`Unknown orchestrated session: ${needle}`);
+    if (prefixes.length > 1) ambiguous(needle, prefixes);
+
+    const fuzzy = sessions.filter((session) =>
+      session.name.toLocaleLowerCase().includes(folded) || session.cwd.toLocaleLowerCase().includes(folded),
+    );
+    if (fuzzy.length === 1) return fuzzy[0];
+    if (fuzzy.length > 1) ambiguous(needle, fuzzy);
+    throw new Error(`Unknown Pi session: ${needle}`);
   }
 
   async function discoverRuntimes(signal?: AbortSignal): Promise<RuntimeIndex> {
@@ -402,6 +477,16 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     if (runtimes.length === 0) return "stopped";
     const statuses = [...new Set(runtimes.map((pane) => pane.agent_status ?? "unknown"))];
     return statuses.length === 1 ? statuses[0] : "multiple";
+  }
+
+  function effectiveOrigin(session: ManagedSession, runtimes: HerdrPane[]): SessionOrigin {
+    return session.orchestrated ? "created" : runtimes.length > 0 ? "discovered" : "historical";
+  }
+
+  function assertNotSelf(session: ManagedSession, action: string): void {
+    if (currentSessionPath && resolve(session.sessionPath) === resolve(currentSessionPath)) {
+      throw new Error(`Cannot ${action} the current Pi session through pi_sessions`);
+    }
   }
 
   function latestMessage(session: ManagedSession, role: "user" | "assistant"): { text: string; timestamp: number } | null {
@@ -532,7 +617,12 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
   }
 
   async function sendPrompt(session: ManagedSession, message: string, signal?: AbortSignal): Promise<ManagedSession> {
-    const launched = await launchSession(session, signal);
+    assertNotSelf(session, "send to");
+    const existing = await oneRuntime(session, signal);
+    if (existing && !session.orchestrated) {
+      throw new Error(`Refusing to send to discovered session ${session.id}: Pi cannot verify that its editor draft is empty. Focus it or use the side-chat mailbox handoff instead.`);
+    }
+    const launched = existing ? { session, runtime: existing } : await launchSession(session, signal);
     const pane = launched.runtime;
     if (pane.agent_status === "working" || pane.agent_status === "blocked") {
       throw new Error(`Session ${session.id} is ${pane.agent_status}; wait for it before sending another message`);
@@ -540,6 +630,32 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     await herdr(["pane", "run", pane.pane_id, message], signal);
     await waitUntilPromptAccepted(launched.session, pane.pane_id, message, signal);
     return resolveSession(session.id);
+  }
+
+  async function closeRuntimeTabs(runtimes: HerdrPane[], signal?: AbortSignal): Promise<void> {
+    const tabIds = [...new Set(runtimes.map((runtime) => runtime.tab_id).filter((id): id is string => Boolean(id)))];
+    for (const tabId of tabIds) await herdr(["tab", "close", tabId], signal);
+    for (const runtime of runtimes.filter((pane) => !pane.tab_id)) {
+      await herdr(["pane", "close", runtime.pane_id], signal);
+    }
+  }
+
+  async function monitorTaskCompletion(sessionId: string): Promise<void> {
+    const deadline = Date.now() + 24 * 60 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const current = await resolveSession(sessionId);
+      if (current.lifecycle !== "task") return;
+      const runtimes = await runtimesFor(current);
+      const status = runtimeStatus(runtimes);
+      const latest = latestMessage(current, "assistant");
+      const latestUser = latestMessage(current, "user");
+      if (latest && latestUser && latest.timestamp >= latestUser.timestamp && (status === "idle" || status === "done")) {
+        await closeRuntimeTabs(runtimes);
+        return;
+      }
+      if (status === "stopped" || status === "multiple") return;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
+    }
   }
 
   async function createSession(
@@ -560,14 +676,15 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     const createdAt = Date.now();
     manager.appendSessionInfo(name);
     manager.appendCustomEntry(METADATA_TYPE, {
-      version: 2,
+      version: 3,
       id,
       sessionId,
       createdAt,
       createdBy: TOOL_NAME,
       initialProvider: ctx.model?.provider,
       initialModel: ctx.model?.id,
-      initialThinking: pi.getThinkingLevel(),
+      initialThinking: params.thinking ?? pi.getThinkingLevel(),
+      lifecycle: params.lifecycle === "task" ? "task" : "persistent",
     } satisfies OrchestratorMetadata);
     const sessionPath = manager.getSessionFile();
     const header = manager.getHeader();
@@ -596,18 +713,25 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     name: TOOL_NAME,
     label: "Pi Sessions",
     description:
-      "Create and manage fresh, persistent Pi sessions in Herdr tabs. New sessions receive only their explicit starting message plus normal project context; they do not inherit this conversation.",
-    promptSnippet: "Create and manage independent persistent Pi sessions in Herdr",
+      "Discover and manage local Pi sessions, including orchestrator-created workers, active external Herdr sessions, and inactive historical sessions on disk. New sessions receive only their explicit starting message plus normal project context; they do not inherit this conversation. Reserve creation for explicit requests, clean-room review, or substantial independent work—not routine inspect-edit-test workflows, small fixes, or tightly coupled side-chat work. Ambiguous lookups are rejected with candidates, and unsafe cross-session operations are blocked.",
+    promptSnippet: "Discover and safely manage local Pi sessions",
     promptGuidelines: [
-      "Use pi_sessions when the user asks to start, inspect, monitor, or manage a separate durable Pi session or direction of work.",
+      "Use pi_sessions to discover or manage existing local Pi sessions when requested; session creation should remain exceptional.",
+      "Create a subagent session only for substantial independent work or a deliberately clean-room perspective. Do not use it for routine inspect-edit-test workflows, simple fixes, tightly coupled work, or merely because delegation is available—especially from an ephemeral side chat. If uncertain, work in the current session or ask the user first.",
       "When creating with pi_sessions, make the starting message self-contained because the new session does not inherit the current conversation.",
+      "Use lifecycle=task for sessions acting as internal subagents; use persistent only when the user wants to keep or revisit the session tab.",
+      "Treat a created pi_sessions worker as blocking when its result is needed for the current request: watch it to completion, inspect and validate its result, and continue dependent work in the same turn. Leave it running only when the user explicitly asks for background work; after a watch timeout, inspect status and output before responding.",
     ],
     parameters: Type.Object({
       action: Action,
-      id: Type.Optional(Type.String({ description: "Managed session ID, unique prefix, or exact name" })),
+      id: Type.Optional(Type.String({ description: "Session ID/prefix, path, pane ID, exact/fuzzy name, cwd fragment, or current/self alias" })),
       name: Type.Optional(Type.String({ description: "Session name for create or rename" })),
       message: Type.Optional(Type.String({ description: "Starting message for create or follow-up for send" })),
-      cwd: Type.Optional(Type.String({ description: "Working directory for create; defaults to the current cwd" })),
+      cwd: Type.Optional(Type.String({ description: "Working directory for create, or cwd substring filter for list" })),
+      createdAfter: Type.Optional(Type.String({ description: "List sessions created after ISO date/time or relative duration (for example 3d)" })),
+      updatedAfter: Type.Optional(Type.String({ description: "List sessions updated after ISO date/time or relative duration (for example 2w)" })),
+      lifecycle: Type.Optional(SessionLifecycle),
+      thinking: Type.Optional(ThinkingLevel),
       timeoutSeconds: Type.Optional(
         Type.Integer({ minimum: 1, maximum: 3600, description: "Watch timeout; default 300" }),
       ),
@@ -620,21 +744,33 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
         case "create": {
           const session = await createSession(params, ctx, signal);
           const runtime = await oneRuntime(session, signal);
+          if (session.lifecycle === "task") {
+            void monitorTaskCompletion(session.id).catch(() => {});
+          }
           return toolResult(
-            `Created ${session.id} (${session.name})\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent.`,
+            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent.`,
             { session, runtime },
           );
         }
         case "list": {
-          const [sessions, runtimeIndex] = await Promise.all([discoverSessions(), discoverRuntimes(signal)]);
-          if (sessions.length === 0) return toolResult("No orchestrated Pi sessions.", { sessions: [] });
+          const [allSessions, runtimeIndex] = await Promise.all([discoverSessions(), discoverRuntimes(signal)]);
+          const createdAfter = parseDateFilter(params.createdAfter, "createdAfter");
+          const updatedAfter = parseDateFilter(params.updatedAfter, "updatedAfter");
+          const cwdFilter = params.cwd?.trim().toLocaleLowerCase();
+          const sessions = allSessions.filter((session) =>
+            (!cwdFilter || session.cwd.toLocaleLowerCase().includes(cwdFilter)) &&
+            (createdAfter === undefined || session.createdAt >= createdAfter) &&
+            (updatedAfter === undefined || session.updatedAt >= updatedAfter),
+          );
+          if (sessions.length === 0) return toolResult("No local Pi sessions matched.", { sessions: [] });
           const rows: string[] = [];
           const details = [];
           for (const session of sessions) {
             const runtimes = await runtimesFor(session, signal, runtimeIndex);
             const status = runtimeStatus(runtimes);
-            rows.push(`${session.id}  ${status.padEnd(8)}  ${session.name}  (${formatAge(session.updatedAt)} ago)`);
-            details.push({ ...session, status, runtimes });
+            const origin = effectiveOrigin(session, runtimes);
+            rows.push(`${session.id}  ${origin.padEnd(10)}  ${status.padEnd(8)}  ${session.name}  (${formatAge(session.updatedAt)} ago)`);
+            details.push({ ...session, origin, status, runtimes });
           }
           return toolResult(rows.join("\n"), { sessions: details });
         }
@@ -646,6 +782,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           return toolResult(
             [
               `${session.id} (${session.name})`,
+              `Origin: ${effectiveOrigin(session, runtimes)}`,
               `Status: ${status}`,
               `Session: ${session.sessionPath}`,
               runtimes.length ? `Herdr pane: ${runtimes.map((pane) => pane.pane_id).join(", ")}` : "Herdr pane: stopped",
@@ -683,12 +820,18 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
               onUpdate?.(toolResult(`Watching ${current.id}: ${status}`, { session: current, status, runtimes, latest }));
             }
             if (latest && latestUser && latest.timestamp >= latestUser.timestamp && (status === "idle" || status === "done")) {
-              return toolResult(`Completed ${current.id} (${current.name})\n\n${latest.text}`, {
-                session: current,
-                status,
-                runtimes,
-                latest,
-              });
+              const cleanedUp = current.lifecycle === "task";
+              if (cleanedUp) await closeRuntimeTabs(runtimes, signal).catch(() => {});
+              return toolResult(
+                `Completed ${current.id} (${current.name})${cleanedUp ? "\nHerdr task tab closed; session file preserved." : ""}\n\n${latest.text}`,
+                {
+                  session: current,
+                  status,
+                  runtimes,
+                  latest,
+                  cleanedUp,
+                },
+              );
             }
             if (status === "blocked") {
               return toolResult(`${current.id} (${current.name}) is blocked and needs input.`, {
@@ -698,7 +841,14 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
                 latest,
               });
             }
-            if (status === "stopped") throw new Error(`${current.id} stopped before completing`);
+            if (status === "stopped") {
+              return toolResult(`${current.id} (${current.name}) is historical/stopped.${latest ? `\n\n${latest.text}` : ""}`, {
+                session: current,
+                status,
+                runtimes,
+                latest,
+              });
+            }
             if (status === "multiple") throw new Error(`${current.id} is open in multiple Herdr panes`);
             await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
           }
@@ -713,6 +863,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
         }
         case "stop": {
           const session = await resolveSession(params.id);
+          assertNotSelf(session, "stop");
           const runtimes = await runtimesFor(session, signal);
           for (const runtime of runtimes) await herdr(["pane", "close", runtime.pane_id], signal);
           return toolResult(`Stopped ${session.id}; session file preserved.`, { session, stoppedRuntimes: runtimes });
@@ -729,6 +880,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const name = params.name?.trim();
           if (!name) throw new Error("rename requires name");
           const session = await resolveSession(params.id);
+          // Renaming the current session is safe and useful. Self-target guards remain
+          // in place for send and stop, which can recurse or tear down this runtime.
           const runtime = await oneRuntime(session, signal);
           if (runtime?.agent_status === "working" || runtime?.agent_status === "blocked") {
             throw new Error(`Cannot rename while ${session.id} is ${runtime.agent_status}`);

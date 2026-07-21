@@ -2,6 +2,9 @@
 *~
 *.swp
 
+# Never track dependency installs or generated package trees
+**/node_modules/
+
 # Never track Pi credentials, conversations, generated state, or package caches
 **/auth.json
 **/mcp.json

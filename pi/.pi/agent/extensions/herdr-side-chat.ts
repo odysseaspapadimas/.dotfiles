@@ -36,6 +36,7 @@ interface SideHandoff {
 interface PendingSummary {
   token: string;
   instructions?: string;
+  purpose: "handoff" | "refresh" | "close";
 }
 
 const SUMMARY_MARKER = "[herdr-side-chat:summary:";
@@ -149,6 +150,29 @@ function formatTokenEstimate(tokens: number): string {
   return tokens >= 1_000 ? `~${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}k tokens` : `~${tokens} tokens`;
 }
 
+function userTurnCount(entries: Parameters<typeof buildSessionContext>[0], leaf?: string): number {
+  return buildSessionContext(entries, leaf).messages.filter((message) => message.role === "user").length;
+}
+
+export function hasUnhandedWork(localCount: number, handedOffLocalCount: number): boolean {
+  return localCount > handedOffLocalCount;
+}
+
+export function sideStatusLabel(
+  behind: number,
+  localCount: number,
+  handedOffLocalCount: number,
+  lastMode?: "full" | "summary",
+): string {
+  const freshness = behind > 0 ? `context ${behind} turn${behind === 1 ? "" : "s"} behind` : "context current";
+  const handoff = hasUnhandedWork(localCount, handedOffLocalCount)
+    ? `${localCount} local · unhanded`
+    : lastMode
+      ? `${localCount} local · ${lastMode} handed off`
+      : `${localCount} local`;
+  return `side: ephemeral · ${freshness} · ${handoff}`;
+}
+
 export default function herdrSideChat(pi: ExtensionAPI) {
   let inheritedMessages: ReturnType<typeof buildSessionContext>["messages"] = [];
   let sidePaneId: string | undefined;
@@ -157,6 +181,14 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   let drainingMailbox = false;
   let drainAgain = false;
   let pendingSummary: PendingSummary | undefined;
+  let sourceLeaf = SOURCE_LEAF;
+  let sourceSnapshotAt = Date.now();
+  let sourceTurnCount = 0;
+  let localCutoffAt = 0;
+  let handedOffLocalCount = 0;
+  let lastHandoffMode: "full" | "summary" | undefined;
+  let lastHandoffAt: number | undefined;
+  let sideStatusTimer: ReturnType<typeof setInterval> | undefined;
 
   function stopMailbox(): void {
     mailboxWatcher?.close();
@@ -250,6 +282,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "message") continue;
       const { message } = entry;
+      if (message.timestamp < localCutoffAt) continue;
       if (message.role === "user") {
         if (containsSummaryMarker(message.content)) {
           skippingSummaryResponse = true;
@@ -269,6 +302,53 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     const turns = localTurns(ctx);
     if (turns.length === 0) return null;
     return `Here is the full transcript from an ephemeral side conversation:\n\n${turns.join("\n\n")}`;
+  }
+
+  async function refreshInheritedContext(summary?: string): Promise<void> {
+    if (!SOURCE_SESSION) throw new Error("Source session is unavailable");
+    const source = SessionManager.open(SOURCE_SESSION);
+    sourceLeaf = source.getLeafId() ?? undefined;
+    const entries = source.getEntries();
+    inheritedMessages = buildSessionContext(entries, sourceLeaf).messages;
+    sourceTurnCount = userTurnCount(entries, sourceLeaf);
+    sourceSnapshotAt = Date.now();
+    if (summary) {
+      inheritedMessages.push({
+        role: "user",
+        content: [{ type: "text", text: `Summary of the side conversation before its context was refreshed:\n\n${summary}` }],
+        timestamp: sourceSnapshotAt,
+      } as (typeof inheritedMessages)[number]);
+    }
+  }
+
+  function currentSourceTurnCount(): number {
+    if (!SOURCE_SESSION) return sourceTurnCount;
+    try {
+      const source = SessionManager.open(SOURCE_SESSION);
+      return userTurnCount(source.getEntries(), source.getLeafId() ?? undefined);
+    } catch {
+      return sourceTurnCount;
+    }
+  }
+
+  function updateSideStatus(ctx: ExtensionContext): void {
+    if (!SIDE_MODE) return;
+    const localCount = localTurns(ctx).length;
+    const behind = Math.max(0, currentSourceTurnCount() - sourceTurnCount);
+    const label = sideStatusLabel(behind, localCount, handedOffLocalCount, lastHandoffAt ? lastHandoffMode : undefined);
+    ctx.ui.setStatus("herdr-side-chat", ctx.ui.theme.fg("accent", label));
+  }
+
+  function alreadyHandedOff(ctx: ExtensionContext): boolean {
+    const count = localTurns(ctx).length;
+    return count > 0 && !hasUnhandedWork(count, handedOffLocalCount);
+  }
+
+  function markHandedOff(ctx: ExtensionContext, mode: "full" | "summary"): void {
+    handedOffLocalCount = localTurns(ctx).length;
+    lastHandoffMode = mode;
+    lastHandoffAt = Date.now();
+    updateSideStatus(ctx);
   }
 
   function summaryResponse(ctx: ExtensionContext, token: string): string | null {
@@ -296,6 +376,10 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   }
 
   async function injectRaw(ctx: ExtensionCommandContext): Promise<void> {
+    if (alreadyHandedOff(ctx)) {
+      ctx.ui.notify("This side conversation has already been handed off. Add a new turn before injecting it again.", "warning");
+      return;
+    }
     const content = buildRawHandoff(ctx);
     if (!content) {
       ctx.ui.notify("There is no side conversation to inject yet.", "warning");
@@ -312,10 +396,15 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     }
 
     await writeHandoff(content);
+    markHandedOff(ctx, "full");
     ctx.ui.notify(`Full side conversation handed off (${formatTokenEstimate(estimate)}).`, "info");
   }
 
-  function beginSummary(ctx: ExtensionCommandContext, instructions?: string): void {
+  function beginSummary(
+    ctx: ExtensionCommandContext,
+    instructions?: string,
+    purpose: PendingSummary["purpose"] = "handoff",
+  ): void {
     if (pendingSummary) {
       ctx.ui.notify("A side-chat summary is already being generated.", "warning");
       return;
@@ -324,11 +413,33 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       ctx.ui.notify("There is no side conversation to summarize yet.", "warning");
       return;
     }
+    if (purpose === "handoff" && alreadyHandedOff(ctx)) {
+      ctx.ui.notify("This side conversation has already been handed off. Add a new turn before injecting it again.", "warning");
+      return;
+    }
 
     const token = randomUUID();
-    pendingSummary = { token, instructions: instructions?.trim() || undefined };
+    pendingSummary = { token, instructions: instructions?.trim() || undefined, purpose };
     pi.sendUserMessage(buildSummaryPrompt(token, pendingSummary.instructions));
     ctx.ui.notify("Generating a side-chat handoff summary…", "info");
+  }
+
+  async function saveSideConversation(ctx: ExtensionCommandContext): Promise<string> {
+    if (!SOURCE_SESSION) throw new Error("Cannot save: source session is unavailable");
+    const saved = SessionManager.forkFrom(SOURCE_SESSION, ctx.cwd);
+    if (sourceLeaf && saved.getEntry(sourceLeaf)) saved.branch(sourceLeaf);
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "message") {
+        if (entry.message.timestamp < localCutoffAt) continue;
+        if (entry.message.role !== "branchSummary" && entry.message.role !== "compactionSummary") {
+          saved.appendMessage(entry.message);
+        }
+      } else if (entry.type === "custom_message") {
+        saved.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
+      }
+    }
+    saved.appendSessionInfo("Saved side chat");
+    return saved.getSessionFile() ?? "saved session";
   }
 
   async function herdr(args: string[]): Promise<HerdrResponse> {
@@ -462,8 +573,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   }
 
   if (SIDE_MODE) {
-    pi.on("session_start", (_event, ctx) => {
-      ctx.ui.setStatus("herdr-side-chat", ctx.ui.theme.fg("accent", "side: ephemeral"));
+    pi.on("session_start", async (_event, ctx) => {
       if (!SOURCE_SESSION) {
         ctx.ui.notify("PI_HERDR_SIDE_SOURCE is missing; this side chat has no inherited context.", "error");
         return;
@@ -471,7 +581,13 @@ export default function herdrSideChat(pi: ExtensionAPI) {
 
       try {
         const source = SessionManager.open(SOURCE_SESSION);
-        inheritedMessages = buildSessionContext(source.getEntries(), SOURCE_LEAF ?? source.getLeafId()).messages;
+        const entries = source.getEntries();
+        const leaf = sourceLeaf ?? source.getLeafId() ?? undefined;
+        inheritedMessages = buildSessionContext(entries, leaf).messages;
+        sourceTurnCount = userTurnCount(entries, leaf);
+        sourceSnapshotAt = Date.now();
+        updateSideStatus(ctx);
+        sideStatusTimer = setInterval(() => updateSideStatus(ctx), 15_000);
       } catch (error) {
         inheritedMessages = [];
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -482,14 +598,24 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       if (pendingSummary) {
         // Summaries see only the side-local branch. Previous synthetic summary turns
         // are removed, while the current request remains visible to the model.
-        return { messages: filterSummaryArtifacts(event.messages, pendingSummary.token) };
+        return {
+          messages: filterSummaryArtifacts(event.messages, pendingSummary.token).filter(
+            (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
+          ),
+        };
       }
-      if (inheritedMessages.length === 0) return;
-      return { messages: [...inheritedMessages, ...filterSummaryArtifacts(event.messages)] };
+      const localMessages = filterSummaryArtifacts(event.messages).filter(
+        (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
+      );
+      if (inheritedMessages.length === 0) return { messages: localMessages };
+      return { messages: [...inheritedMessages, ...localMessages] };
     });
 
     pi.on("agent_settled", async (_event, ctx) => {
-      if (!pendingSummary) return;
+      if (!pendingSummary) {
+        updateSideStatus(ctx);
+        return;
+      }
       const request = pendingSummary;
       pendingSummary = undefined;
       const summary = summaryResponse(ctx, request.token);
@@ -499,11 +625,31 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       }
 
       try {
+        if (request.purpose === "refresh") {
+          localCutoffAt = Date.now();
+          handedOffLocalCount = 0;
+          lastHandoffAt = undefined;
+          lastHandoffMode = undefined;
+          await refreshInheritedContext(summary);
+          updateSideStatus(ctx);
+          ctx.ui.notify("Side conversation summarized and inherited context refreshed.", "info");
+          return;
+        }
+
         await writeHandoff(`Here is a summarized handoff from an ephemeral side conversation:\n\n${summary}`);
+        markHandedOff(ctx, "summary");
         ctx.ui.notify(`Summarized side conversation handed off (${formatTokenEstimate(tokenEstimate(summary))}).`, "info");
+        if (request.purpose === "close" && CURRENT_PANE) {
+          await herdr(["pane", "close", CURRENT_PANE]);
+        }
       } catch (error) {
-        ctx.ui.notify(`Summary generated, but handoff failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        ctx.ui.notify(`Summary generated, but follow-up failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
+    });
+
+    pi.on("session_shutdown", () => {
+      if (sideStatusTimer) clearInterval(sideStatusTimer);
+      sideStatusTimer = undefined;
     });
 
     pi.registerCommand("side", {
@@ -581,27 +727,88 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     pi.registerCommand("side:save", {
       description: "Persist this otherwise-ephemeral side conversation as a normal Pi session.",
       handler: async (_args, ctx) => {
-        if (!SOURCE_SESSION) {
-          ctx.ui.notify("Cannot save: source session is unavailable.", "error");
-          return;
-        }
-
         try {
-          const saved = SessionManager.forkFrom(SOURCE_SESSION, ctx.cwd);
-          if (SOURCE_LEAF && saved.getEntry(SOURCE_LEAF)) {
-            saved.branch(SOURCE_LEAF);
+          const path = await saveSideConversation(ctx);
+          ctx.ui.notify(`Saved side chat: ${path}`, "info");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+      },
+    });
+
+    pi.registerCommand("side:refresh", {
+      description: "Refresh inherited main-session context, preserving, discarding, or summarizing local work.",
+      handler: async (_args, ctx) => {
+        const localCount = localTurns(ctx).length;
+        const options = ["Preserve side conversation", "Start fresh with latest context"];
+        if (localCount > 0) options.push("Summarize side conversation, then refresh");
+        const choice = await ctx.ui.select("Refresh side-chat context", options);
+        if (!choice) return;
+        try {
+          if (choice.startsWith("Summarize")) {
+            beginSummary(ctx, undefined, "refresh");
+            return;
           }
-          for (const entry of ctx.sessionManager.getBranch()) {
-            if (entry.type === "message") {
-              if (entry.message.role !== "branchSummary" && entry.message.role !== "compactionSummary") {
-                saved.appendMessage(entry.message);
-              }
-            } else if (entry.type === "custom_message") {
-              saved.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
-            }
+          if (choice.startsWith("Start fresh")) {
+            localCutoffAt = Date.now();
+            handedOffLocalCount = 0;
+            lastHandoffAt = undefined;
+            lastHandoffMode = undefined;
           }
-          saved.appendSessionInfo("Saved side chat");
-          ctx.ui.notify(`Saved side chat: ${saved.getSessionFile()}`, "info");
+          await refreshInheritedContext();
+          updateSideStatus(ctx);
+          ctx.ui.notify("Inherited main-session context refreshed.", "info");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+      },
+    });
+
+    pi.registerCommand("side:status", {
+      description: "Show side-chat context freshness and management actions.",
+      handler: async (_args, ctx) => {
+        updateSideStatus(ctx);
+        const localCount = localTurns(ctx).length;
+        const behind = Math.max(0, currentSourceTurnCount() - sourceTurnCount);
+        const ageMinutes = Math.max(0, Math.floor((Date.now() - sourceSnapshotAt) / 60_000));
+        const choice = await ctx.ui.select(
+          `Side chat · snapshot ${ageMinutes}m ago · ${behind} turns behind · ${localCount} local`,
+          ["Refresh context…", "Inject summary", "Inject full conversation", "Save conversation", "Close side chat…"],
+        );
+        if (!choice) return;
+        if (choice === "Refresh context…") {
+          const mode = await ctx.ui.select("Refresh side-chat context", ["Preserve side conversation", "Start fresh with latest context", "Summarize side conversation, then refresh"]);
+          if (!mode) return;
+          if (mode.startsWith("Summarize")) beginSummary(ctx, undefined, "refresh");
+          else {
+            if (mode.startsWith("Start fresh")) localCutoffAt = Date.now();
+            await refreshInheritedContext();
+            updateSideStatus(ctx);
+          }
+        } else if (choice === "Inject summary") beginSummary(ctx);
+        else if (choice === "Inject full conversation") await injectRaw(ctx);
+        else if (choice === "Save conversation") ctx.ui.notify(`Saved side chat: ${await saveSideConversation(ctx)}`, "info");
+        else pi.sendUserMessage("/side:close");
+      },
+    });
+
+    pi.registerCommand("side:close", {
+      description: "Close the side chat, protecting local work that has not been handed off.",
+      handler: async (_args, ctx) => {
+        const hasUnhanded = hasUnhandedWork(localTurns(ctx).length, handedOffLocalCount);
+        let choice = "Discard and close";
+        if (hasUnhanded) {
+          const selected = await ctx.ui.select("Unhanded side-chat work", ["Summarize to main and close", "Save and close", "Discard and close", "Cancel"]);
+          if (!selected || selected === "Cancel") return;
+          choice = selected;
+        }
+        try {
+          if (choice === "Summarize to main and close") {
+            beginSummary(ctx, undefined, "close");
+            return;
+          }
+          if (choice === "Save and close") await saveSideConversation(ctx);
+          if (CURRENT_PANE) await herdr(["pane", "close", CURRENT_PANE]);
         } catch (error) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         }
@@ -644,6 +851,50 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     },
   });
 
+  async function runSideCommand(command: string, ctx: ExtensionCommandContext): Promise<void> {
+    if (!CURRENT_PANE) return;
+    const paneId = await findSidePane(CURRENT_PANE);
+    if (!paneId) {
+      ctx.ui.notify("No side chat is open.", "warning");
+      return;
+    }
+    await focusPane(paneId);
+    await herdr(["pane", "run", paneId, command]);
+  }
+
+  pi.registerCommand("side:inject", {
+    description: "Run a summary, guided, or full handoff in the open side chat.",
+    handler: async (args, ctx) => {
+      try {
+        await runSideCommand(`/side:inject${args.trim() ? ` ${args.trim()}` : ""}`, ctx);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("side:refresh", {
+    description: "Open context refresh options in the side chat.",
+    handler: async (_args, ctx) => {
+      try {
+        await runSideCommand("/side:refresh", ctx);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("side:status", {
+    description: "Open the side-chat management menu.",
+    handler: async (_args, ctx) => {
+      try {
+        await runSideCommand("/side:status", ctx);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
   pi.registerCommand("side:new", {
     description: "Discard the current side chat and create a fresh context snapshot.",
     handler: async (_args, ctx) => {
@@ -658,12 +909,17 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("side:close", {
-    description: "Close and discard the ephemeral side chat.",
+    description: "Focus the side chat and safely close, save, or hand off its local work.",
     handler: async (_args, ctx) => {
       if (!CURRENT_PANE) return;
       try {
-        const closed = await closeSidePane(CURRENT_PANE);
-        ctx.ui.notify(closed ? "Side chat discarded." : "No side chat is open.", "info");
+        const paneId = await findSidePane(CURRENT_PANE);
+        if (!paneId) {
+          ctx.ui.notify("No side chat is open.", "info");
+          return;
+        }
+        await focusPane(paneId);
+        await herdr(["pane", "run", paneId, "/side:close"]);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

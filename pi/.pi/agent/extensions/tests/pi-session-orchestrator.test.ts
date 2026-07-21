@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+async function main() {
 const root = await mkdtemp(join(tmpdir(), "pi-session-orchestrator-test-"));
 const agentDir = join(root, "agent");
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -23,6 +24,7 @@ interface Pane {
 
 const panes = new Map<string, Pane>();
 let registered: any;
+const eventHandlers = new Map<string, (...args: any[]) => unknown>();
 let nextRuntime = 1;
 
 function output(result: unknown = {}) {
@@ -49,6 +51,9 @@ function appendExchange(path: string, prompt: string): void {
 }
 
 const fakePi: any = {
+  on(name: string, handler: (...args: any[]) => unknown) {
+    eventHandlers.set(name, handler);
+  },
   registerTool(definition: any) {
     registered = definition;
   },
@@ -78,7 +83,10 @@ const fakePi: any = {
         );
         assert.match(text, hasAssistant ? /--provider 'test'/ : /--provider 'test-provider'/);
         assert.match(text, hasAssistant ? /--model 'model'/ : /--model 'test-model'/);
-        assert.match(text, /--thinking 'medium'/);
+        const metadata = SessionManager.open(match[1]).getEntries().findLast(
+          (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+        )?.data;
+        assert.match(text, new RegExp(`--thinking '${metadata?.initialThinking ?? "medium"}'`));
         pane.agent = "pi";
         pane.agent_status = "idle";
         pane.agent_session = { kind: "path", value: match[1] };
@@ -131,6 +139,41 @@ try {
   await assert.rejects(readFile(registryPath), /ENOENT/);
   assert.ok(SessionManager.open(legacyPath).getEntries().some((entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator"));
 
+  // Ordinary Pi sessions are retained as historical records, then classified as discovered when active.
+  const external = SessionManager.create(root);
+  external.appendSessionInfo("External review");
+  const externalPath = external.getSessionFile()!;
+  await mkdir(dirname(externalPath), { recursive: true });
+  await writeFile(externalPath, `${[external.getHeader(), ...external.getEntries()].map(JSON.stringify).join("\n")}\n`);
+  appendExchange(externalPath, "ordinary session");
+  result = await execute({ action: "list" });
+  assert.match(result.content[0].text, new RegExp(`${external.getSessionId()}\\s+historical\\s+stopped`));
+  result = await execute({ action: "list", cwd: root, updatedAfter: "1d" });
+  assert.match(result.content[0].text, /External review/);
+  result = await execute({ action: "list", createdAfter: "2999-01-01T00:00:00Z" });
+  assert.match(result.content[0].text, /No local Pi sessions matched/);
+  await assert.rejects(execute({ action: "list", createdAfter: "sometime recently" }), /must be an ISO date/);
+  result = await execute({ action: "read", id: "External review" });
+  assert.match(result.content[0].text, /ordinary session/);
+
+  panes.set("w-test:external", {
+    pane_id: "w-test:external",
+    tab_id: "w-test:external-tab",
+    workspace_id: "w-test",
+    agent: "pi",
+    agent_status: "idle",
+    agent_session: { kind: "path", value: externalPath },
+  });
+  result = await execute({ action: "status", id: "w-test:external" });
+  assert.match(result.content[0].text, /Origin: discovered/);
+  await assert.rejects(
+    execute({ action: "send", id: external.getSessionId(), message: "unsafe draft overwrite" }),
+    /cannot verify that its editor draft is empty/,
+  );
+  panes.delete("w-test:external");
+  result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
+  assert.match(result.content[0].text, /historical\/stopped/);
+
   result = await execute({ action: "create", name: "Lifecycle", message: "start", cwd: root });
   const created = result.details.session;
   assert.match(created.id, /^dir_[0-9a-f]{32}$/);
@@ -144,7 +187,7 @@ try {
   const prefix = created.id.slice(0, 12);
   result = await execute({ action: "status", id: prefix });
   assert.match(result.content[0].text, /Status: idle/);
-  await assert.rejects(execute({ action: "status", id: "dir_" }), /Ambiguous session ID prefix/);
+  await assert.rejects(execute({ action: "status", id: "dir_" }), /Ambiguous Pi session query/);
   assert.match(result.content[0].text, /reply: start/);
 
   result = await execute({ action: "read", id: "Lifecycle", limit: 10 });
@@ -158,6 +201,13 @@ try {
   assert.match(result.content[0].text, /Sent follow-up/);
   result = await execute({ action: "read", id: created.id });
   assert.match(result.content[0].text, /reply: follow up/);
+
+  eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(created.sessionPath) });
+  await execute({ action: "rename", id: "self", name: "Self renamed" });
+  result = await execute({ action: "status", id: "self" });
+  assert.match(result.content[0].text, /\(Self renamed\)/);
+  await assert.rejects(execute({ action: "send", id: "self", message: "loop" }), /current Pi session/);
+  eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(externalPath) });
 
   await execute({ action: "rename", id: created.id, name: "Renamed" });
   result = await execute({ action: "status", id: "Renamed" });
@@ -202,6 +252,23 @@ try {
   assert.match(result.content[0].text, /Status: stopped/);
   resumedPane.agent_session = { kind: "path", value: created.sessionPath };
 
+  // Task sessions can override thinking and automatically close their Herdr tab while preserving history.
+  const taskResult = await execute({
+    action: "create",
+    name: "Task worker",
+    message: "one task",
+    cwd: root,
+    lifecycle: "task",
+    thinking: "high",
+  });
+  const task = taskResult.details.session;
+  assert.equal(task.lifecycle, "task");
+  assert.equal(task.thinking, "high");
+  assert.match(taskResult.content[0].text, /Lifecycle: task/);
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.ok(SessionManager.open(task.sessionPath).getEntries().length > 0);
+  assert.equal([...panes.values()].some((pane) => pane.agent_session?.value === task.sessionPath), false);
+
   // Session-file deletion naturally removes the durable record.
   await execute({ action: "stop", id: created.id });
   await unlink(created.sessionPath);
@@ -212,3 +279,9 @@ try {
 } finally {
   await rm(root, { recursive: true, force: true });
 }
+}
+
+void main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

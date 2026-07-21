@@ -16,5 +16,6 @@
     "npm:pi-context-usage",
     "npm:@juicesharp/rpiv-todo"
   ],
-  "quietStartup": false
+  "quietStartup": false,
+  "steeringMode": "one-at-a-time"
 }
