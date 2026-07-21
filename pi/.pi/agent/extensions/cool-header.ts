@@ -2,6 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.PI_HERDR_SIDE === "1") return;
+
   let currentModel = "no-model";
   let currentCwd = "";
 
