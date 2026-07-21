@@ -28,9 +28,10 @@ Hide or restore the ambient above-editor indicator without disabling review trac
 /diff hide
 /diff show
 /diff toggle
+/diff clear
 ```
 
-The visibility choice lasts for the current Pi runtime; `/reload` resets it to visible.
+The visibility choice lasts for the current Pi runtime; `/reload` resets it to visible. `/diff clear` asks for confirmation, then uses the current files as a new baseline and resets both turn history and session totals without changing any project files.
 
 The first selection starts `hunk patch <stable-cache-file> --watch` in the selected user-facing pane or tab. Later selections reuse the corresponding target and rewrite the same watched file in place. Hunk 0.17.3 did not reliably observe patch-file rewrites in the practical Herdr PTY test, so the extension restarts only the Hunk command in that pane as a deterministic fallback. Hunk provides its normal sidebar plus split/stack layouts.
 

@@ -186,8 +186,8 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Changes indicator shown.", "info");
         return;
       }
-      if (action) {
-        ctx.ui.notify("Usage: /diff [hide|show|toggle]", "warning");
+      if (action && action !== "clear") {
+        ctx.ui.notify("Usage: /diff [hide|show|toggle|clear]", "warning");
         return;
       }
       try {
@@ -202,6 +202,28 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
       }
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/diff requires Pi's interactive TUI", "warning");
+        return;
+      }
+      if (action === "clear") {
+        if (draft) {
+          ctx.ui.notify("Wait for the current agent run to finish before clearing diff history.", "warning");
+          return;
+        }
+        const confirmed = await ctx.ui.confirm(
+          "Clear diff history?",
+          "Use the current files as the new baseline and reset all turn and session counters?",
+        );
+        if (!confirmed) return;
+        try {
+          live = await ledger.resetBaseline();
+          nextTurnIndex = 0;
+          currentStats = emptyStats();
+          sessionStats = emptyStats();
+          updateWidget(ctx);
+          ctx.ui.notify("Diff history cleared. Current files are now the session baseline.", "info");
+        } catch (error) {
+          ctx.ui.notify(`Could not clear diff history: ${String(error)}`, "error");
+        }
         return;
       }
       try {

@@ -160,6 +160,32 @@ test("restores persisted snapshots without embedding patches in the index", asyn
   assert.match(patch, /\+changed/);
 });
 
+test("resets turn history and adopts the current files as a new baseline", async () => {
+  const repo = await temporaryDirectory("pi-ledger-reset-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  await initRepo(repo);
+  const ledger = new ChangedFilesLedger(fakePi(), "session-reset", repo, cache);
+  await ledger.initialize();
+
+  const draft = await ledger.beginTurn(0);
+  await writeFile(join(repo, "tracked.txt"), "changed\n");
+  await ledger.finishTurn(draft);
+  assert.equal(ledger.index?.turns.length, 1);
+  assert.equal(ledger.sessionStats().files, 1);
+
+  const baseline = await ledger.resetBaseline();
+  assert.equal(ledger.index?.turns.length, 0);
+  assert.deepEqual(changedPaths(baseline, ledger.index!.latest), []);
+  assert.equal(ledger.sessionStats().files, 0);
+  assert.match(await readFile(ledger.patchPath, "utf8"), /Diff history cleared/);
+
+  const nextDraft = await ledger.beginTurn(0);
+  await writeFile(join(repo, "tracked.txt"), "changed again\n");
+  const nextRecord = await ledger.finishTurn(nextDraft);
+  assert.equal(nextRecord.stats.files, 1);
+  assert.equal(ledger.sessionStats().files, 1);
+});
+
 test("normalizes materialized directory prefixes for Hunk sidebar paths", () => {
   const input = [
     "diff --git a/before/src/a.ts b/after/src/a.ts",

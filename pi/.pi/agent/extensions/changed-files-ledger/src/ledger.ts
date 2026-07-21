@@ -269,6 +269,21 @@ export class ChangedFilesLedger {
     });
   }
 
+  async resetBaseline(): Promise<Snapshot> {
+    return this.exclusive(async () => {
+      if (!this.index) throw new Error("Ledger has not been initialized");
+      const baseline = await this.captureSnapshot();
+      this.index.baseline = baseline;
+      this.index.latest = baseline;
+      this.index.turns = [];
+      this.index.updatedAt = new Date().toISOString();
+      await this.saveIndex();
+      await this.garbageCollectBlobs();
+      await writeFile(this.patchPath, emptyPatch("Diff history cleared"));
+      return baseline;
+    });
+  }
+
   async finishTurn(
     draft: { id: string; turnIndex: number; startedAt: string; before: Snapshot },
     timestamp = Date.now(),
