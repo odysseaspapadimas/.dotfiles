@@ -9,6 +9,7 @@ import {
   parseCheckpointPromotion,
   formatCheckpointStorage,
   formatRecoveryHistory,
+  hasVisibleChanges,
   formatRestorationAudit,
   formatRestoreActionSummary,
   recoveryPruneDisclosure,
@@ -114,6 +115,14 @@ test("recovery history status and prune disclosure name every preserved category
     "7 agent-turn restoration target(s), 2 restoration audit(s). 3 safety and 4 named checkpoint(s) are separate and retained.");
   assert.equal(recoveryPruneDisclosure(report),
     "Delete 7 agent-turn restoration target(s) and 2 restoration audit record(s). This cannot be undone. All 3 safety and 4 named checkpoint(s) are preserved; diff review scopes are unchanged.");
+});
+
+test("ambient ledger stays hidden until there are file changes", () => {
+  const empty = { files: 0, additions: 0, deletions: 0, binary: 0 };
+  const changed = { files: 1, additions: 2, deletions: 0, binary: 0 };
+  assert.equal(hasVisibleChanges(empty, empty), false);
+  assert.equal(hasVisibleChanges(changed, empty), true);
+  assert.equal(hasVisibleChanges(empty, changed), true);
 });
 
 test("checkpoint storage reporting includes counts and readable physical size", () => {

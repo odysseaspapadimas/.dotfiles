@@ -175,6 +175,10 @@ export function formatRestoreActionSummary(target: RestoreTarget, preview: Rollb
   ].join("\n");
 }
 
+export function hasVisibleChanges(current: DiffStats, session: DiffStats): boolean {
+  return current.files > 0 || session.files > 0;
+}
+
 export function formatCheckpointStorage(report: CheckpointStorageReport): string {
   const units = ["B", "KiB", "MiB", "GiB"];
   let value = report.namedBytes;
@@ -236,7 +240,7 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
 
   function updateWidget(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
-    if (widgetHidden) {
+    if (widgetHidden || !hasVisibleChanges(currentStats, sessionStats)) {
       ctx.ui.setWidget(WIDGET_ID, undefined);
       ctx.ui.setStatus(WIDGET_ID, undefined);
       return;

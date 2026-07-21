@@ -1,5 +1,17 @@
 onboarding = false
 
+[theme]
+name = "catppuccin"
+
+[theme.custom]
+# Catppuccin Macchiato-inspired overrides.
+panel_bg = "#24273a"
+accent = "#c6a0f6"
+blue = "#8aadf4"
+green = "#a6da95"
+red = "#ed8796"
+yellow = "#eed49f"
+
 [keys]
 prefix = "ctrl+space"
 
