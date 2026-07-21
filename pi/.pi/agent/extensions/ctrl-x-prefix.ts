@@ -18,20 +18,22 @@ const CHORD_TIMEOUT_MS = 2_000;
 
 type LeaderCommand =
   | { label: string; action: AppKeybinding }
-  | { label: string; command: string };
+  | { label: string; command: string; preserveDraft?: boolean };
 
 const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   c: { label: "copy", action: "app.message.copy" },
   m: { label: "model", action: "app.model.select" },
-  s: { label: "settings", command: "/settings" },
+  s: { label: "settings", command: "/settings", preserveDraft: true },
   r: { label: "reload", command: "/reload" },
   l: { label: "sessions", action: "app.session.resume" },
   u: { label: "resume", action: "app.session.resume" },
   t: { label: "tree", action: "app.session.tree" },
   n: { label: "new", action: "app.session.new" },
-  h: { label: "share", command: "/share" },
-  o: { label: "quota", command: "/quota" },
-  i: { label: "login", command: "/login" },
+  h: { label: "share", command: "/share", preserveDraft: true },
+  o: { label: "quota", command: "/codex-quota", preserveDraft: true },
+  i: { label: "login", command: "/login", preserveDraft: true },
+  b: { label: "side chat", command: "/side", preserveDraft: true },
+  d: { label: "diff", command: "/diff", preserveDraft: true },
 };
 
 function getChord(data: string): LeaderCommand | undefined {
@@ -53,7 +55,7 @@ function buildHelpLines(theme: Theme, width: number): string[] {
   const rows = [
     `${theme.fg("muted", "Session ")} ${item("n", "new")}  ${item("l/u", "resume")}  ${item("t", "tree")}`,
     `${theme.fg("muted", "Pi      ")} ${item("m", "model")}  ${item("s", "settings")}  ${item("r", "reload")}`,
-    `${theme.fg("muted", "Other   ")} ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
+    `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("d", "diff")}  ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
     `${theme.fg("muted", "Help    ")} ${item("?", "show this window")}  ${label("Esc/Enter closes")}`,
   ];
 
@@ -179,11 +181,21 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
           return;
         }
 
-        if (this.getText().length > 0) {
+        const draft = this.getText();
+        if (draft.length > 0 && !command.preserveDraft) {
           ctx.ui.notify(
             `Clear or submit the current draft before ${command.label}`,
             "warning",
           );
+          return;
+        }
+
+        if (draft.length > 0) {
+          const submitted = this.onSubmit?.(command.command) as unknown;
+          void Promise.resolve(submitted).finally(() => {
+            this.setText(draft);
+            this.tui.requestRender();
+          });
           return;
         }
 
