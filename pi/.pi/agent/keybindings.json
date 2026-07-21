@@ -2,6 +2,6 @@
   "app.model.select": [],
   "app.session.resume": [],
   "app.session.new": [],
-  "app.thinking.cycle": ["ctrl+t"],
-  "app.thinking.toggle": []
+  "app.thinking.cycle": ["shift+tab"],
+  "app.thinking.toggle": ["ctrl+t"]
 }
