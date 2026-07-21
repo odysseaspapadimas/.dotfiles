@@ -1,0 +1,22 @@
+{
+  "name": "pi-changed-files-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone per-turn Pi changed-files ledger with Hunk review integration",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
