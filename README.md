@@ -8,7 +8,7 @@ Personal configuration managed with [GNU Stow](https://www.gnu.org/software/stow
 sudo apt-get install stow
 git clone <your-repository-url> ~/dotfiles
 cd ~/dotfiles
-stow -t ~ pi herdr hunk
+stow -t ~ pi herdr hunk portd
 ```
 
 ## Packages
@@ -16,6 +16,8 @@ stow -t ~ pi herdr hunk
 - `pi` — Pi settings, keybindings, themes, and locally maintained extensions.
 - `herdr` — Herdr keybindings, UI preferences, notifications, and custom commands.
 - `hunk` — Hunk custom Catppuccin Mocha review theme.
+- `portd` — automatic SSH development-port forwarding source and Herdr plugin.
+- `macos` — Mac launch agents and local wrappers for portd and Browser Control; stow this package only on the Mac.
 
 Sensitive and generated Pi state is intentionally excluded, including OAuth credentials, MCP credentials, sessions, package installs, caches, and review reports.
 
@@ -23,5 +25,8 @@ Sensitive and generated Pi state is intentionally excluded, including OAuth cred
 
 ```bash
 cd ~/dotfiles
-stow -R -t ~ pi herdr hunk
+stow -R -t ~ pi herdr hunk portd
+
+# On the Mac:
+stow -R -t ~ macos
 ```

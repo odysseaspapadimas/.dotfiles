@@ -1,0 +1,26 @@
+id = "dev.odysseas.portd"
+name = "Development ports"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Discover and control Mac forwards for services running on the remote host"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh development ports"
+contexts = ["workspace", "pane"]
+command = ["/usr/bin/curl", "-fsS", "-X", "POST", "http://127.0.0.1:43117/api/refresh"]
+
+[[events]]
+on = "pane.created"
+command = ["/usr/bin/curl", "-fsS", "-X", "POST", "http://127.0.0.1:43117/api/refresh"]
+
+[[events]]
+on = "pane.exited"
+command = ["/usr/bin/curl", "-fsS", "-X", "POST", "http://127.0.0.1:43117/api/refresh"]
+
+[[panes]]
+id = "ports"
+title = "Development ports"
+placement = "overlay"
+command = ["/usr/bin/env", "ports"]

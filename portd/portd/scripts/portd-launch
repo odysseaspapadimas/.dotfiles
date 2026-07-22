@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -eu
+
+state_dir="${HOME}/.local/state/portd"
+stdout_log="${state_dir}/portd.log"
+stderr_log="${state_dir}/portd.error.log"
+max_bytes=$((1024 * 1024))
+
+mkdir -p "${state_dir}"
+
+rotate_log() {
+    log="$1"
+    if [ -f "${log}" ] && [ "$(wc -c < "${log}")" -ge "${max_bytes}" ]; then
+        mv -f "${log}" "${log}.1"
+    fi
+}
+
+rotate_log "${stdout_log}"
+rotate_log "${stderr_log}"
+
+exec "${HOME}/.local/bin/portd" "$@" >>"${stdout_log}" 2>>"${stderr_log}"

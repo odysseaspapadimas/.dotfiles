@@ -1,0 +1,8 @@
+#!/bin/sh
+
+set -eu
+
+exec "${HOME}/.local/bin/herdr" \
+    --remote ubuntu \
+    --session work \
+    --remote-keybindings server

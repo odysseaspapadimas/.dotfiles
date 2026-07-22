@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+file="/opt/homebrew/lib/node_modules/@opencode-ai/browser-control/dist/cli.js"
+python3 - "$file" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+production = 'const allowAnyChromeExtension = browserControlVersion === "0.0.0-dev";'
+patched = 'const allowAnyChromeExtension = true; // Local unpacked extension until Store release'
+if production in s:
+    p.write_text(s.replace(production, patched, 1))
+elif patched not in s:
+    raise SystemExit("Browser Control unpacked-extension patch no longer applies; inspect the installed release")
+PY
+exec /opt/homebrew/bin/browser-control serve
