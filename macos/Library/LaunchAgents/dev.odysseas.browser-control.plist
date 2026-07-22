@@ -2,26 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>PATH</key>
-		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin</string>
-	</dict>
-	<key>KeepAlive</key>
-	<true/>
-	<key>Label</key>
-	<string>dev.odysseas.browser-control</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/Users/odysseas/.local/bin/browser-control-launch</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardErrorPath</key>
-	<string>/Users/odysseas/.local/state/browser-control.error.log</string>
-	<key>StandardOutPath</key>
-	<string>/Users/odysseas/.local/state/browser-control.log</string>
-	<key>ThrottleInterval</key>
-	<integer>5</integer>
+  <key>Label</key>
+  <string>dev.odysseas.browser-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "$HOME/.local/bin/browser-control-launch"</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
 </dict>
 </plist>

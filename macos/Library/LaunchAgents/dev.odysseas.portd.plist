@@ -2,29 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>KeepAlive</key>
-	<true/>
-	<key>Label</key>
-	<string>dev.odysseas.portd</string>
-	<key>ProcessType</key>
-	<string>Background</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/Users/odysseas/.local/bin/portd-launch</string>
-		<string>--host</string>
-		<string>ubuntu</string>
-		<string>--interval</string>
-		<string>2</string>
-		<string>--idle-interval</string>
-		<string>15</string>
-		<string>--max-backoff</string>
-		<string>300</string>
-		<string>--reverse-forward</string>
-		<string>19989:19989</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>ThrottleInterval</key>
-	<integer>5</integer>
+  <key>Label</key>
+  <string>dev.odysseas.portd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "$HOME/.local/bin/portd-launch" --host ubuntu --interval 2 --idle-interval 15 --max-backoff 300 --reverse-forward 19989:19989</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
 </dict>
 </plist>

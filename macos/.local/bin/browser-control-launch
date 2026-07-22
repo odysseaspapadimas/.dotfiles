@@ -1,7 +1,19 @@
 #!/bin/sh
 set -eu
-file="/opt/homebrew/lib/node_modules/@opencode-ai/browser-control/dist/cli.js"
-python3 - "$file" <<'PY'
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+state_dir="${HOME}/.local/state"
+stdout_log="${state_dir}/browser-control.log"
+stderr_log="${state_dir}/browser-control.error.log"
+package_root="$(npm root --global)/@opencode-ai/browser-control"
+file="${package_root}/dist/cli.js"
+
+mkdir -p "${state_dir}"
+
+# Browser Control 0.3.2 accepts only its unpublished Store extension ID in
+# production builds. Permit the locally installed unpacked extension until the
+# Store build is available. Fail closed when upstream code changes.
+python3 - "${file}" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
@@ -12,4 +24,5 @@ if production in s:
 elif patched not in s:
     raise SystemExit("Browser Control unpacked-extension patch no longer applies; inspect the installed release")
 PY
-exec /opt/homebrew/bin/browser-control serve
+
+exec browser-control serve >>"${stdout_log}" 2>>"${stderr_log}"
