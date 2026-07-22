@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { gunzip } from "node:zlib";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -52,6 +52,26 @@ function fakePi(): ExtensionAPI {
   } as ExtensionAPI;
 }
 
+function workspaceListingPi(workspace: string, listings: Record<string, string[]>, superprojects = new Set<string>()): ExtensionAPI {
+  return {
+    async exec(_command: string, args: string[], options?: { cwd?: string }) {
+      const cwd = options?.cwd ? resolve(options.cwd) : "";
+      const repositoryName = cwd ? basename(cwd) : "";
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        if (cwd === resolve(workspace)) return { stdout: "", stderr: "not a git repository", code: 128, killed: false };
+        if (Object.hasOwn(listings, repositoryName)) return { stdout: `${cwd}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--show-superproject-working-tree") {
+        return { stdout: superprojects.has(repositoryName) ? `${workspace}/superproject\n` : "", stderr: "", code: 0, killed: false };
+      }
+      if (args[0] === "ls-files" && Object.hasOwn(listings, repositoryName)) {
+        return { stdout: `${listings[repositoryName]!.join("\0")}\0`, stderr: "", code: 0, killed: false };
+      }
+      throw new Error(`Unexpected command in ${cwd}: ${args.join(" ")}`);
+    },
+  } as ExtensionAPI;
+}
+
 function listingPi(root: string, paths: string[]): ExtensionAPI {
   return {
     async exec(_command: string, args: string[]) {
@@ -77,19 +97,231 @@ test("refuses a non-Git home cwd before creating or scanning a cache", async () 
   const started = performance.now();
   await assert.rejects(
     ledger.initialize(),
-    /\$HOME is not inside a Git worktree\. Start Pi in a bounded project directory\./,
+    /\$HOME is not inside a Git worktree and cannot be used as a multi-repository workspace\./,
   );
   assert.ok(performance.now() - started < 1_000, "home guard should fail quickly");
   await assert.rejects(access(cache), /ENOENT/);
 });
 
-test("refuses any non-Git root rather than recursively traversing it", async () => {
+test("refuses a non-Git root without immediate-child repositories rather than recursively traversing it", async () => {
   const root = await temporaryDirectory("pi-ledger-non-git-");
   const cache = join(await temporaryDirectory("pi-ledger-non-git-cache-"), "cache-does-not-exist");
   await writeFile(join(root, "would-have-been-read.txt"), "do not scan\n");
   const ledger = new ChangedFilesLedger(fakePi(), "session-non-git", root, cache);
   await assert.rejects(ledger.initialize(), /is not inside a Git worktree/);
   await assert.rejects(access(cache), /ENOENT/);
+});
+
+test("discovers immediate-child repositories as one namespaced workspace with combined stats and patch", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  const frontend = join(workspace, "frontend");
+  const backend = join(workspace, "backend");
+  const nested = join(workspace, "group", "nested");
+  await mkdir(frontend);
+  await mkdir(backend);
+  await mkdir(nested, { recursive: true });
+  await Promise.all([initRepo(frontend), initRepo(backend), initRepo(nested)]);
+
+  const ledger = new ChangedFilesLedger(fakePi(), "session-workspace", workspace, cache);
+  await ledger.initialize();
+  assert.equal(ledger.root, workspace);
+  assert.equal(ledger.workspaceKind, "multi");
+  assert.deepEqual(ledger.repositories.map((repository) => repository.name), ["backend", "frontend"]);
+  assert.equal(ledger.repositories.some((repository) => repository.name === "nested"), false, "discovery must not recurse");
+  assert.deepEqual(Object.keys(ledger.index!.baseline.files), ["backend/tracked.txt", "frontend/tracked.txt"]);
+
+  const draft = await ledger.beginTurn(0, 1_000);
+  await writeFile(join(frontend, "tracked.txt"), "frontend change\n");
+  await writeFile(join(backend, "tracked.txt"), "backend change\n");
+  await writeFile(join(backend, "new.txt"), "backend untracked\n");
+  const record = await ledger.finishTurn(draft, 2_000);
+  assert.deepEqual(changedPaths(record.before, record.after), [
+    "backend/new.txt",
+    "backend/tracked.txt",
+    "frontend/tracked.txt",
+  ]);
+  assert.equal(record.stats.files, 3);
+  assert.equal(record.repositoryStats?.backend?.files, 2);
+  assert.equal(record.repositoryStats?.frontend?.files, 1);
+
+  const scope = ledger.currentScope();
+  assert.ok(scope);
+  const patch = await readFile(await ledger.writePatch(scope), "utf8");
+  assert.match(patch, /diff --git a\/backend\/tracked\.txt b\/backend\/tracked\.txt/);
+  assert.match(patch, /diff --git a\/frontend\/tracked\.txt b\/frontend\/tracked\.txt/);
+  assert.match(patch, /diff --git a\/backend\/new\.txt b\/backend\/new\.txt/);
+  assert.doesNotMatch(patch, /group\/nested/);
+
+  const persisted = JSON.parse(await readFile(ledger.indexPath, "utf8"));
+  assert.equal(persisted.version, 4);
+  assert.equal(persisted.workspaceKind, "multi");
+  assert.deepEqual(persisted.repositories.map((repository: { name: string; prefix: string }) => [repository.name, repository.prefix]), [
+    ["backend", "backend"],
+    ["frontend", "frontend"],
+  ]);
+
+  const reopened = new ChangedFilesLedger(fakePi(), "session-workspace", workspace, cache);
+  await reopened.initialize();
+  assert.equal(reopened.workspaceKind, "multi");
+  assert.deepEqual(reopened.repositories.map((repository) => repository.name), ["backend", "frontend"]);
+  assert.equal(reopened.index?.recoveryTurns.length, 1);
+  assert.equal(reopened.index?.recoveryTurns[0]?.repositoryStats?.backend?.files, 2);
+});
+
+test("applies the file-count safety limit across all workspace repositories before reads", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-limit-");
+  const cache = join(await temporaryDirectory("pi-ledger-workspace-limit-cache-"), "cache");
+  for (const name of ["frontend", "backend"]) await mkdir(join(workspace, name, ".git"), { recursive: true });
+  const paths = Array.from({ length: 2_501 }, (_, index) => `missing-${index}.txt`);
+  const ledger = new ChangedFilesLedger(
+    workspaceListingPi(workspace, { frontend: paths, backend: paths }),
+    "session-workspace-limit",
+    workspace,
+    cache,
+  );
+  await assert.rejects(ledger.initialize(), /workspace has 5002 candidate files \(limit 5000\)/);
+  assert.deepEqual(await readdir(ledger.blobDir), []);
+});
+
+test("applies byte and repository-count limits to the whole bounded workspace", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-byte-limit-");
+  const cache = join(await temporaryDirectory("pi-ledger-workspace-byte-limit-cache-"), "cache");
+  const listings: Record<string, string[]> = {};
+  for (const name of ["frontend", "backend", "api", "worker", "service", "admin"]) {
+    await mkdir(join(workspace, name, ".git"), { recursive: true });
+    await writeFile(join(workspace, name, "large.bin"), "");
+    await truncate(join(workspace, name, "large.bin"), 18 * 1024 * 1024);
+    listings[name] = ["large.bin"];
+  }
+  const ledger = new ChangedFilesLedger(
+    workspaceListingPi(workspace, listings),
+    "session-workspace-byte-limit",
+    workspace,
+    cache,
+  );
+  await assert.rejects(ledger.initialize(), /workspace candidate files exceed 104857600 total bytes/);
+  assert.deepEqual(await readdir(ledger.blobDir), []);
+
+  const crowded = await temporaryDirectory("pi-ledger-workspace-repo-limit-");
+  const crowdedCache = join(await temporaryDirectory("pi-ledger-workspace-repo-limit-cache-"), "cache");
+  for (let index = 0; index < 33; index += 1) await mkdir(join(crowded, `repo-${index}`, ".git"), { recursive: true });
+  const tooMany = new ChangedFilesLedger(fakePi(), "session-workspace-repo-limit", crowded, crowdedCache);
+  await assert.rejects(tooMany.initialize(), /more than 32 immediate-child repositories/);
+  await assert.rejects(access(crowdedCache), /ENOENT/);
+});
+
+test("rejects symlinked and submodule immediate-child repository candidates", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-reject-");
+  const external = await temporaryDirectory("pi-ledger-external-repo-");
+  const cache = join(await temporaryDirectory("pi-ledger-workspace-reject-cache-"), "cache");
+  await initRepo(external);
+  await symlink(external, join(workspace, "linked"));
+  const linked = new ChangedFilesLedger(fakePi(), "session-linked-repo", workspace, cache);
+  await assert.rejects(linked.initialize(), /symlinked repository candidate is not allowed: linked/);
+  await assert.rejects(access(cache), /ENOENT/);
+
+  await rm(join(workspace, "linked"));
+  await mkdir(join(workspace, "service"));
+  await writeFile(join(workspace, "service", ".git"), "gitdir: ../superproject/.git/modules/service\n");
+  const submodule = new ChangedFilesLedger(
+    workspaceListingPi(workspace, { service: [] }, new Set(["service"])),
+    "session-submodule-repo",
+    workspace,
+    cache,
+  );
+  await assert.rejects(submodule.initialize(), /submodule repository candidates are not allowed: service/);
+  await assert.rejects(access(cache), /ENOENT/);
+});
+
+test("rejects workspace membership changes rather than silently skipping a repository", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-membership-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  const frontend = join(workspace, "frontend");
+  await mkdir(frontend);
+  await initRepo(frontend);
+  const ledger = new ChangedFilesLedger(fakePi(), "session-membership", workspace, cache);
+  await ledger.initialize();
+
+  const backend = join(workspace, "backend");
+  await mkdir(backend);
+  await initRepo(backend);
+  await assert.rejects(ledger.captureSnapshot(), /workspace repository membership changed; no repository was skipped/);
+});
+
+test("restores all affected repositories from a composite checkpoint and verifies namespaced state", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-restore-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  const frontend = join(workspace, "frontend");
+  const backend = join(workspace, "backend");
+  await mkdir(frontend);
+  await mkdir(backend);
+  await Promise.all([initRepo(frontend), initRepo(backend)]);
+  const ledger = new ChangedFilesLedger(fakePi(), "session-workspace-restore", workspace, cache);
+  await ledger.initialize();
+  const checkpoint = await ledger.createCheckpoint("named", "both good");
+  assert.ok(checkpoint.snapshot.files["frontend/tracked.txt"]);
+  assert.ok(checkpoint.snapshot.files["backend/tracked.txt"]);
+
+  await writeFile(join(frontend, "tracked.txt"), "frontend bad\n");
+  await writeFile(join(backend, "tracked.txt"), "backend bad\n");
+  await writeFile(join(frontend, "new.txt"), "remove me\n");
+  await writeFile(join(backend, "new.txt"), "remove me too\n");
+  const preview = await ledger.previewRollback(checkpoint.id);
+  assert.equal(preview.scope.stats.files, 4);
+  assert.equal(preview.scope.repositoryStats?.frontend?.files, 2);
+  assert.equal(preview.scope.repositoryStats?.backend?.files, 2);
+  const result = await ledger.rollback(preview, { confirmed: true }, 3);
+
+  assert.equal(await readFile(join(frontend, "tracked.txt"), "utf8"), "one\n");
+  assert.equal(await readFile(join(backend, "tracked.txt"), "utf8"), "one\n");
+  await assert.rejects(access(join(frontend, "new.txt")), /ENOENT/);
+  await assert.rejects(access(join(backend, "new.txt")), /ENOENT/);
+  assert.ok(result.safetyCheckpoint.snapshot.files["frontend/tracked.txt"]);
+  assert.ok(result.safetyCheckpoint.snapshot.files["backend/tracked.txt"]);
+  assert.equal(result.turn.repositoryStats?.frontend?.files, 2);
+  assert.equal(result.turn.repositoryStats?.backend?.files, 2);
+});
+
+test("preflights every repository before restore and creates no partial safety point when one disappears", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-preflight-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  const frontend = join(workspace, "frontend");
+  const backend = join(workspace, "backend");
+  await mkdir(frontend);
+  await mkdir(backend);
+  await Promise.all([initRepo(frontend), initRepo(backend)]);
+  const ledger = new ChangedFilesLedger(fakePi(), "session-workspace-preflight", workspace, cache);
+  await ledger.initialize();
+  const checkpoint = await ledger.createCheckpoint("named", "target");
+  await writeFile(join(frontend, "tracked.txt"), "frontend current\n");
+  await writeFile(join(backend, "tracked.txt"), "backend current\n");
+  const preview = await ledger.previewRollback(checkpoint.id);
+  const checkpointCount = ledger.listCheckpoints().length;
+  await rm(join(backend, ".git"), { recursive: true, force: true });
+
+  await assert.rejects(ledger.rollback(preview, { confirmed: true }, 4), /workspace repository membership changed/);
+  assert.equal(ledger.listCheckpoints().length, checkpointCount);
+  assert.equal(await readFile(join(frontend, "tracked.txt"), "utf8"), "frontend current\n");
+  assert.equal(await readFile(join(backend, "tracked.txt"), "utf8"), "backend current\n");
+});
+
+test("rejects a tracked path whose parent was replaced by a symlink escape", async () => {
+  const repo = await temporaryDirectory("pi-ledger-parent-symlink-");
+  const outside = await temporaryDirectory("pi-ledger-parent-symlink-outside-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  await initRepo(repo);
+  await mkdir(join(repo, "dir"));
+  await writeFile(join(repo, "dir", "tracked.txt"), "inside\n");
+  await execFileAsync("git", ["add", "dir/tracked.txt"], { cwd: repo });
+  await writeFile(join(outside, "tracked.txt"), "outside\n");
+  const ledger = new ChangedFilesLedger(fakePi(), "session-parent-symlink", repo, cache);
+  await ledger.initialize();
+  await rm(join(repo, "dir"), { recursive: true });
+  await symlink(outside, join(repo, "dir"));
+
+  await assert.rejects(ledger.captureSnapshot(), /Restore parent is not a directory/);
+  assert.equal(await readFile(join(outside, "tracked.txt"), "utf8"), "outside\n");
 });
 
 test("rejects too many Git candidates before stat or content reads", async () => {
@@ -167,7 +399,7 @@ test("restores persisted snapshots without embedding patches in the index", asyn
   assert.match(patch, /\+changed/);
 });
 
-test("stores version-3 indexes as snapshot IDs and verifies addressable manifests", async () => {
+test("stores version-4 workspace indexes as snapshot IDs and verifies addressable manifests", async () => {
   const repo = await temporaryDirectory("pi-ledger-manifests-");
   const cache = await temporaryDirectory("pi-ledger-cache-");
   await initRepo(repo);
@@ -178,7 +410,10 @@ test("stores version-3 indexes as snapshot IDs and verifies addressable manifest
   await ledger.finishTurn(draft);
 
   const persisted = JSON.parse(await readFile(ledger.indexPath, "utf8"));
-  assert.equal(persisted.version, 3);
+  assert.equal(persisted.version, 4);
+  assert.equal(persisted.workspaceKind, "single");
+  assert.equal(persisted.repositories.length, 1);
+  assert.equal(persisted.repositories[0].prefix, "");
   assert.match(persisted.baseline, /^[a-f0-9]{64}$/);
   assert.match(persisted.latest, /^[a-f0-9]{64}$/);
   assert.equal(typeof persisted.recoveryTurns[0].before, "string");
@@ -217,7 +452,7 @@ test("lazily migrates a version-1 inline index when its session is opened", asyn
   const restored = new ChangedFilesLedger(fakePi(), "session-migrate", repo, cache);
   await restored.initialize();
   const migrated = JSON.parse(await readFile(restored.indexPath, "utf8"));
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
   assert.equal(typeof migrated.baseline, "string");
   assert.equal(typeof migrated.recoveryTurns[0].before, "string");
   assert.equal(restored.index?.recoveryTurns.length, 1);
@@ -242,13 +477,13 @@ test("lazily and safely splits version-2 turns into review and recovery historie
 
   const migrated = new ChangedFilesLedger(fakePi(), "session-v2-migrate", repo, cache);
   await migrated.initialize();
-  assert.equal(migrated.index?.version, 3);
+  assert.equal(migrated.index?.version, 4);
   assert.equal(migrated.index?.reviewTurns.length, 1);
   assert.equal(migrated.index?.recoveryTurns.length, 1);
   assert.equal(migrated.index?.reviewTurns[0]?.id, migrated.index?.recoveryTurns[0]?.id);
   assert.equal(migrated.index?.recoveryTurns[0]?.source, undefined, "old turns retain fallback behavior");
   const rewritten = JSON.parse(await readFile(migrated.indexPath, "utf8"));
-  assert.equal(rewritten.version, 3);
+  assert.equal(rewritten.version, 4);
   assert.equal("turns" in rewritten, false);
 });
 
@@ -610,8 +845,10 @@ test("normalizes materialized directory prefixes for Hunk sidebar paths", () => 
     "--- a/before/src/a.ts",
     "+++ b/after/src/a.ts",
     "Binary files a/before/img.png and b/after/img.png differ",
+    "+literal a/before/content must remain unchanged",
   ].join("\n");
   const normalized = normalizeMaterializedPatch(input);
   assert.match(normalized, /diff --git a\/src\/a\.ts b\/src\/a\.ts/);
-  assert.doesNotMatch(normalized, /before\/|after\//);
+  assert.match(normalized, /\+literal a\/before\/content must remain unchanged/);
+  assert.doesNotMatch(normalized.split("\n").slice(0, 4).join("\n"), /before\/|after\//);
 });

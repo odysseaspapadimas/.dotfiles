@@ -61,10 +61,6 @@ function sideLabel(parentPane: string): string {
   return `side-chat ${parentPane}`;
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 function mailboxDirectory(parentPane: string): string {
   const safePane = parentPane.replace(/[^a-zA-Z0-9_-]/g, "_");
   return join(SHARED_AGENT_DIR, "herdr-side-chat", "mailboxes", safePane);
@@ -560,16 +556,32 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     sidePaneId = paneId;
     await herdr(["pane", "rename", paneId, sideLabel(CURRENT_PANE)]);
 
-    const command = [
-      "pi",
+    const agentArgs = [
       "--no-session",
-      ctx.model ? `--provider ${shellQuote(ctx.model.provider)}` : "",
-      ctx.model ? `--model ${shellQuote(ctx.model.id)}` : "",
-      `--thinking ${shellQuote(pi.getThinkingLevel())}`,
-    ]
-      .filter(Boolean)
-      .join(" ");
-    await herdr(["pane", "run", paneId, command]);
+      ...(ctx.model ? ["--provider", ctx.model.provider, "--model", ctx.model.id] : []),
+      "--thinking",
+      pi.getThinkingLevel(),
+    ];
+    const agentName = `side-${paneId.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}`.slice(0, 32);
+    try {
+      await herdr([
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        "pi",
+        "--pane",
+        paneId,
+        "--timeout",
+        "25000",
+        "--",
+        ...agentArgs,
+      ]);
+    } catch (error) {
+      await herdr(["pane", "close", paneId]).catch(() => {});
+      sidePaneId = undefined;
+      throw error;
+    }
   }
 
   if (SIDE_MODE) {
@@ -859,7 +871,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       return;
     }
     await focusPane(paneId);
-    await herdr(["pane", "run", paneId, command]);
+    await herdr(["agent", "prompt", paneId, command]);
   }
 
   pi.registerCommand("side:inject", {
@@ -919,7 +931,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
           return;
         }
         await focusPane(paneId);
-        await herdr(["pane", "run", paneId, "/side:close"]);
+        await herdr(["agent", "prompt", paneId, "/side:close"]);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

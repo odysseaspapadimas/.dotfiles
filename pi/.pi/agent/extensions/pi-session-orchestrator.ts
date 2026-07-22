@@ -55,6 +55,8 @@ interface OrchestratorMetadata {
   initialModel?: string;
   initialThinking?: string;
   lifecycle?: "persistent" | "task";
+  parentSessionId?: string;
+  delegationDepth?: number;
   // Legacy metadata included name. It is deliberately ignored: session_info is authoritative.
   name?: string;
 }
@@ -277,6 +279,15 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     currentSessionPath = ctx.sessionManager.getSessionFile();
+  });
+
+  pi.on("before_agent_start", (event, ctx) => {
+    const metadata = metadataFor(ctx.sessionManager);
+    if (!metadata || metadata.createdBy !== TOOL_NAME) return;
+    const depth = Math.max(1, metadata.delegationDepth ?? 1);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nOrchestration: this session owns its assigned task (delegation depth ${depth}); work primarily here, and delegate only clearly separable subtasks—not the whole assignment.`,
+    };
   });
 
   async function herdr(args: string[], signal?: AbortSignal): Promise<HerdrResponse> {
@@ -660,7 +671,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
 
   async function createSession(
     params: ToolParams,
-    ctx: { cwd: string; model?: { provider: string; id: string } | null },
+    ctx: { cwd: string; model?: { provider: string; id: string } | null; sessionManager?: SessionManager },
     signal?: AbortSignal,
   ): Promise<ManagedSession> {
     const name = params.name?.trim();
@@ -675,8 +686,10 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     const id = `dir_${sessionId.replace(/-/g, "")}`;
     const createdAt = Date.now();
     manager.appendSessionInfo(name);
+    const parentHeader = ctx.sessionManager?.getHeader();
+    const parentMetadata = ctx.sessionManager ? metadataFor(ctx.sessionManager) : undefined;
     manager.appendCustomEntry(METADATA_TYPE, {
-      version: 3,
+      version: 4,
       id,
       sessionId,
       createdAt,
@@ -685,6 +698,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       initialModel: ctx.model?.id,
       initialThinking: params.thinking ?? pi.getThinkingLevel(),
       lifecycle: params.lifecycle === "task" ? "task" : "persistent",
+      parentSessionId: parentHeader?.id,
+      delegationDepth: Math.max(0, parentMetadata?.delegationDepth ?? 0) + 1,
     } satisfies OrchestratorMetadata);
     const sessionPath = manager.getSessionFile();
     const header = manager.getHeader();
@@ -717,7 +732,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     promptSnippet: "Discover and safely manage local Pi sessions",
     promptGuidelines: [
       "Use pi_sessions to discover or manage existing local Pi sessions when requested; session creation should remain exceptional.",
-      "Create a subagent session only for substantial independent work or a deliberately clean-room perspective. Do not use it for routine inspect-edit-test workflows, simple fixes, tightly coupled work, or merely because delegation is available—especially from an ephemeral side chat. If uncertain, work in the current session or ask the user first.",
+      "Create a subagent session only for substantial independent work or a deliberately clean-room perspective. A session already created to own an assigned task should work primarily there and delegate only clearly separable subtasks, not pass through the whole assignment. Do not delegate routine inspect-edit-test workflows, simple fixes, tightly coupled work, or merely because delegation is available—especially from an ephemeral side chat. If uncertain, work in the current session or ask the user first.",
       "When creating with pi_sessions, make the starting message self-contained because the new session does not inherit the current conversation.",
       "Use lifecycle=task for sessions acting as internal subagents; use persistent only when the user wants to keep or revisit the session tab.",
       "Treat a created pi_sessions worker as blocking when its result is needed for the current request: watch it to completion, inspect and validate its result, and continue dependent work in the same turn. Leave it running only when the user explicitly asks for background work; after a watch timeout, inspect status and output before responding.",
@@ -865,7 +880,12 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const session = await resolveSession(params.id);
           assertNotSelf(session, "stop");
           const runtimes = await runtimesFor(session, signal);
-          for (const runtime of runtimes) await herdr(["pane", "close", runtime.pane_id], signal);
+          // Orchestrated sessions are launched in dedicated tabs. Closing only the
+          // root pane can leave Herdr's tab alive with stale Pi session metadata,
+          // causing status/watch to report an idle runtime forever. Close the tab
+          // as the lifecycle boundary, with pane close only as a fallback for
+          // runtimes that have no tab metadata.
+          await closeRuntimeTabs(runtimes, signal);
           return toolResult(`Stopped ${session.id}; session file preserved.`, { session, stoppedRuntimes: runtimes });
         }
         case "resume": {

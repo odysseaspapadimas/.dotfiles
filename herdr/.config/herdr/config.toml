@@ -18,6 +18,34 @@ prefix = "ctrl+space"
 [ui]
 agent_panel_sort = "spaces"
 show_agent_labels_on_pane_borders = false
+sidebar_width = 30
+sidebar_min_width = 22
+sidebar_max_width = 40
+
+[ui.sidebar.agents]
+row_gap = 1
+rows = [
+  [
+    { token = "state_icon", bold = true },
+    { token = "agent", fg = "#c6a0f6", bold = true },
+    { token = "state_text", dim = true },
+  ],
+  [
+    { token = "workspace", fg = "#8aadf4" },
+    { token = "tab", dim = true },
+  ],
+]
+
+[ui.sidebar.agents.rows_by_agent]
+pi = [
+  [
+    { token = "state_icon", bold = true },
+    { token = "agent", fg = "#c6a0f6", bold = true },
+    { token = "state_text", dim = true },
+  ],
+  ["workspace", "tab"],
+  ["terminal_title_stripped"],
+]
 
 [ui.toast]
 delivery = "terminal"
@@ -34,6 +62,30 @@ command = "ports"
 width = "82%"
 height = "82%"
 description = "development ports"
+
+[[keys.command]]
+key = "prefix+comma"
+type = "shell"
+command = "python3 \"$HOME/.config/herdr/move-current-tab.py\" left"
+description = "move current tab left"
+
+[[keys.command]]
+key = "prefix+period"
+type = "shell"
+command = "python3 \"$HOME/.config/herdr/move-current-tab.py\" right"
+description = "move current tab right"
+
+[[keys.command]]
+key = "prefix+shift+comma"
+type = "shell"
+command = "python3 \"$HOME/.config/herdr/move-current-workspace.py\" up"
+description = "move current workspace up"
+
+[[keys.command]]
+key = "prefix+shift+period"
+type = "shell"
+command = "python3 \"$HOME/.config/herdr/move-current-workspace.py\" down"
+description = "move current workspace down"
 
 [[keys.command]]
 key = "prefix+shift+e"

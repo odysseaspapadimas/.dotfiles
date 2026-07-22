@@ -1,6 +1,6 @@
 # Herdr side chat
 
-`/side` creates or focuses an ephemeral Pi conversation in a split Herdr pane. The side chat inherits a snapshot of the main session's context without adding its exploratory turns to the main conversation.
+`/side` creates or focuses an ephemeral Pi conversation in a split Herdr pane. The side chat inherits a snapshot of the main session's context without adding its exploratory turns to the main conversation. Herdr's live-agent facade starts the side Pi and submits management commands atomically, so commands are only delivered at a detected agent prompt.
 
 ## Commands
 

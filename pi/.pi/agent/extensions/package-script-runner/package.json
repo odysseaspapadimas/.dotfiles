@@ -1,9 +1,9 @@
 {
-  "name": "pi-changed-files-ledger",
+  "name": "pi-package-script-runner",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Workspace-aware per-turn Pi changed-files ledger with Hunk review integration",
+  "description": "Search and run package.json scripts from Pi in reusable Herdr targets",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"

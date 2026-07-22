@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  opendir,
   readdir,
   readFile,
   readlink,
@@ -18,16 +19,19 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
-const INDEX_VERSION = 3;
+const INDEX_VERSION = 4;
 const MAX_TURNS = 100;
 const MAX_FILES = 5_000;
+const MAX_REPOSITORIES = 32;
+const MAX_WORKSPACE_CHILDREN = 1_000;
+const GIT_TIMEOUT_MS = 2_000;
 const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
@@ -56,6 +60,18 @@ export interface DiffStats {
   binary: number;
 }
 
+export interface RepositoryDescriptor {
+  /** Stable display/namespace name. Single-repository ledgers keep paths unprefixed. */
+  name: string;
+  root: string;
+  prefix: string;
+}
+
+export interface WorkspaceDiffStats {
+  total: DiffStats;
+  repositories: Record<string, DiffStats>;
+}
+
 export type TurnKind = "agent" | "restoration";
 
 export interface TurnSource {
@@ -73,6 +89,8 @@ export interface TurnRecord {
   before: Snapshot;
   after: Snapshot;
   stats: DiffStats;
+  /** Repository-level breakdown; absent only on indexes migrated from older versions. */
+  repositoryStats?: Record<string, DiffStats>;
   /** User message that caused this run; absent on old or unidentifiable turns. */
   source?: TurnSource;
   /** Missing on version-1/early version-2 records and treated as genuine agent work. */
@@ -106,10 +124,13 @@ export interface CheckpointStorageReport {
 }
 
 export interface LedgerIndex {
-  version: 3;
+  version: 4;
   sessionId: string;
+  /** Git root for single-repo mode; Pi cwd workspace root for multi-repo mode. */
   root: string;
   git: boolean;
+  workspaceKind: "single" | "multi";
+  repositories: RepositoryDescriptor[];
   createdAt: string;
   updatedAt: string;
   baseline: Snapshot;
@@ -134,6 +155,7 @@ export interface Scope {
   before: Snapshot;
   after: Snapshot;
   stats: DiffStats;
+  repositoryStats?: Record<string, DiffStats>;
 }
 
 export type RestoreAction = "after" | "undo" | "checkpoint";
@@ -154,6 +176,7 @@ export interface RollbackPreview {
   current: Snapshot;
   /** Current workspace changes not represented by the ledger's latest snapshot. */
   divergence: DiffStats;
+  divergenceRepositoryStats?: Record<string, DiffStats>;
 }
 
 export interface RollbackConfirmation {
@@ -163,6 +186,17 @@ export interface RollbackConfirmation {
 export interface RollbackResult {
   safetyCheckpoint: Checkpoint;
   turn: TurnRecord;
+}
+
+interface ResolvedLedgerPath {
+  repository: RepositoryDescriptor;
+  relativePath: string;
+  absolutePath: string;
+}
+
+interface PreparedRestore {
+  contents: Map<string, Buffer>;
+  paths: Map<string, ResolvedLedgerPath>;
 }
 
 function sha256(value: string | Buffer): string {
@@ -192,6 +226,30 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function lstatOptional(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
+}
+
+function validateRepositoryName(name: string): string {
+  if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || /[\0-\x1f\x7f]/u.test(name)) {
+    throw new Error(`Unsafe workspace repository name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
+function sameRepositories(left: readonly RepositoryDescriptor[], right: readonly RepositoryDescriptor[]): boolean {
+  return left.length === right.length && left.every((repository, index) => {
+    const other = right[index];
+    return Boolean(other && repository.name === other.name && repository.root === other.root && repository.prefix === other.prefix);
+  });
 }
 
 async function atomicWrite(path: string, data: string | Buffer): Promise<void> {
@@ -231,6 +289,8 @@ export class ChangedFilesLedger {
   readonly sessionKey: string;
   root: string;
   isGit = false;
+  workspaceKind: "single" | "multi" = "single";
+  repositories: RepositoryDescriptor[] = [];
   index: LedgerIndex | undefined;
   private operation: Promise<void> = Promise.resolve();
 
@@ -252,22 +312,21 @@ export class ChangedFilesLedger {
 
   async initialize(): Promise<void> {
     const requestedRoot = this.root;
-    const gitRoot = await this.pi.exec("git", ["rev-parse", "--show-toplevel"], {
-      cwd: requestedRoot,
-      timeout: 2_000,
-    });
-    if (gitRoot.code !== 0 || !gitRoot.stdout.trim()) {
-      const location = requestedRoot === resolve(homedir()) ? "$HOME" : requestedRoot;
-      throw new Error(
-        `Changed-files ledger disabled: ${location} is not inside a Git worktree. Start Pi in a bounded project directory.`,
-      );
-    }
-    this.root = resolve(gitRoot.stdout.trim());
+    const workspace = await this.discoverWorkspace(requestedRoot);
+    this.root = workspace.root;
+    this.workspaceKind = workspace.kind;
+    this.repositories = workspace.repositories;
     this.isGit = true;
     await Promise.all([mkdir(this.blobDir, { recursive: true }), mkdir(this.snapshotDir, { recursive: true })]);
 
     const restored = await this.loadIndex();
-    if (restored && restored.root === this.root && restored.sessionId === this.sessionId) {
+    if (restored) {
+      if (restored.root !== this.root || restored.sessionId !== this.sessionId) {
+        throw new Error("Changed-files ledger cache does not match the current session workspace");
+      }
+      if (!sameRepositories(restored.repositories, this.repositories) || restored.workspaceKind !== this.workspaceKind) {
+        throw new Error("Changed-files ledger disabled: workspace repository membership changed; restore the original immediate-child repositories or start a new Pi session.");
+      }
       this.index = restored;
       this.index.latest = await this.captureSnapshot();
       this.index.updatedAt = new Date().toISOString();
@@ -280,6 +339,8 @@ export class ChangedFilesLedger {
         sessionId: this.sessionId,
         root: this.root,
         git: this.isGit,
+        workspaceKind: this.workspaceKind,
+        repositories: this.repositories,
         createdAt: now,
         updatedAt: now,
         baseline,
@@ -291,6 +352,88 @@ export class ChangedFilesLedger {
       await this.saveIndex();
     }
     await this.pruneGlobalCache();
+  }
+
+  private async discoverWorkspace(requestedRoot: string): Promise<{ root: string; kind: "single" | "multi"; repositories: RepositoryDescriptor[] }> {
+    const root = resolve(requestedRoot);
+    const direct = await this.pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: root, timeout: GIT_TIMEOUT_MS });
+    if (direct.killed) throw new Error(`Changed-files ledger disabled: Git validation timed out for ${root}.`);
+    if (direct.code === 0 && direct.stdout.trim()) {
+      const gitRoot = resolve(direct.stdout.trim());
+      return {
+        root: gitRoot,
+        kind: "single",
+        repositories: [{ name: validateRepositoryName(basename(gitRoot)), root: gitRoot, prefix: "" }],
+      };
+    }
+
+    const rootMarker = await lstatOptional(join(root, ".git"));
+    if (rootMarker) {
+      throw new Error(`Changed-files ledger disabled: ${root} has a .git marker but failed bounded Git worktree validation: ${direct.stderr.trim()}`);
+    }
+    if (root === resolve(homedir())) {
+      throw new Error("Changed-files ledger disabled: $HOME is not inside a Git worktree and cannot be used as a multi-repository workspace.");
+    }
+
+    const candidates: Array<{ name: string; root: string }> = [];
+    let children = 0;
+    const directory = await opendir(root);
+    for await (const entry of directory) {
+      children += 1;
+      if (children > MAX_WORKSPACE_CHILDREN) {
+        throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_WORKSPACE_CHILDREN} immediate children.`);
+      }
+      const childRoot = join(root, entry.name);
+      if (entry.isSymbolicLink()) {
+        if (await lstatOptional(join(childRoot, ".git"))) {
+          throw new Error(`Changed-files ledger disabled: symlinked repository candidate is not allowed: ${entry.name}`);
+        }
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+      const marker = await lstatOptional(join(childRoot, ".git"));
+      if (!marker) continue;
+      if (marker.isSymbolicLink() || (!marker.isDirectory() && !marker.isFile())) {
+        throw new Error(`Changed-files ledger disabled: unsafe .git marker in immediate child ${entry.name}.`);
+      }
+      candidates.push({ name: validateRepositoryName(entry.name), root: childRoot });
+      if (candidates.length > MAX_REPOSITORIES) {
+        throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_REPOSITORIES} immediate-child repositories.`);
+      }
+    }
+
+    const repositories = await Promise.all(candidates.map(async (candidate): Promise<RepositoryDescriptor> => {
+      const [top, superproject] = await Promise.all([
+        this.pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: candidate.root, timeout: GIT_TIMEOUT_MS }),
+        this.pi.exec("git", ["rev-parse", "--show-superproject-working-tree"], { cwd: candidate.root, timeout: GIT_TIMEOUT_MS }),
+      ]);
+      if (top.killed || superproject.killed) throw new Error(`Changed-files ledger disabled: Git validation timed out for repository ${candidate.name}.`);
+      if (top.code !== 0 || !top.stdout.trim()) {
+        throw new Error(`Changed-files ledger disabled: immediate child ${candidate.name} has a .git marker but is not a valid Git worktree: ${top.stderr.trim()}`);
+      }
+      if (resolve(top.stdout.trim()) !== resolve(candidate.root)) {
+        throw new Error(`Changed-files ledger disabled: repository ${candidate.name} resolves outside its immediate child directory.`);
+      }
+      if (superproject.code !== 0) {
+        throw new Error(`Changed-files ledger disabled: could not validate superproject state for ${candidate.name}: ${superproject.stderr.trim()}`);
+      }
+      if (superproject.stdout.trim()) {
+        throw new Error(`Changed-files ledger disabled: submodule repository candidates are not allowed: ${candidate.name}`);
+      }
+      return { name: candidate.name, root: resolve(candidate.root), prefix: candidate.name };
+    }));
+    repositories.sort((left, right) => left.name.localeCompare(right.name));
+    if (repositories.length === 0) {
+      throw new Error(`Changed-files ledger disabled: ${root} is not inside a Git worktree and has no independent immediate-child Git repositories.`);
+    }
+    return { root, kind: "multi", repositories };
+  }
+
+  private async validateWorkspaceMembership(): Promise<void> {
+    const current = await this.discoverWorkspace(this.root);
+    if (current.root !== this.root || current.kind !== this.workspaceKind || !sameRepositories(current.repositories, this.repositories)) {
+      throw new Error("Changed-files ledger disabled: workspace repository membership changed; no repository was skipped.");
+    }
   }
 
   async exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -308,51 +451,66 @@ export class ChangedFilesLedger {
   }
 
   async captureSnapshot(): Promise<Snapshot> {
-    if (!this.isGit) throw new Error("Changed-files ledger is not initialized in a Git worktree");
+    if (!this.isGit) throw new Error("Changed-files ledger is not initialized in a Git workspace");
+    await this.validateWorkspaceMembership();
     const paths = await this.gitPaths();
     if (paths.length > MAX_FILES) {
-      throw new Error(`Changed-files ledger disabled: project has ${paths.length} candidate files (limit ${MAX_FILES}).`);
+      throw new Error(`Changed-files ledger disabled: workspace has ${paths.length} candidate files (limit ${MAX_FILES}).`);
     }
 
-    // Complete a metadata-only preflight before reading or storing any content. This
-    // prevents one huge file or tree from leaving a partial multi-megabyte cache.
+    // Preflight metadata across every repository before reading any content. Content is
+    // then fully read and rechecked before any blob is stored, so a racing oversized file
+    // cannot leave a partial workspace snapshot in the cache.
     const candidates: Array<{
-      relativePath: string;
+      ledgerPath: string;
       absolutePath: string;
       info: Stats;
       kind: "file" | "symlink";
     }> = [];
     let totalBytes = 0;
-    for (const listedPath of paths) {
-      const relativePath = validateRelativePath(listedPath);
-      const absolutePath = join(this.root, relativePath);
-      const info = await lstat(absolutePath).catch(() => undefined);
+    for (const listed of paths) {
+      const absolutePath = join(listed.repository.root, listed.relativePath);
+      await this.validateSafeParent(dirname(absolutePath), listed.repository.root);
+      const info = await lstatOptional(absolutePath);
       if (!info || (!info.isFile() && !info.isSymbolicLink())) continue;
       const kind = info.isSymbolicLink() ? "symlink" : "file";
       if (info.size > MAX_FILE_BYTES) {
         throw new Error(
-          `Changed-files ledger disabled: ${normalizePath(relativePath)} is ${info.size} bytes (per-file limit ${MAX_FILE_BYTES}).`,
+          `Changed-files ledger disabled: ${listed.ledgerPath} is ${info.size} bytes (per-file limit ${MAX_FILE_BYTES}).`,
         );
       }
       totalBytes += info.size;
       if (totalBytes > MAX_TOTAL_BYTES) {
-        throw new Error(`Changed-files ledger disabled: candidate files exceed ${MAX_TOTAL_BYTES} total bytes.`);
+        throw new Error(`Changed-files ledger disabled: workspace candidate files exceed ${MAX_TOTAL_BYTES} total bytes.`);
       }
-      candidates.push({ relativePath, absolutePath, info, kind });
+      candidates.push({ ledgerPath: listed.ledgerPath, absolutePath, info, kind });
     }
 
-    const files: Record<string, FileState> = {};
+    const loaded: Array<(typeof candidates)[number] & { content: Buffer }> = [];
+    totalBytes = 0;
     for (const candidate of candidates) {
       const content = candidate.kind === "symlink"
         ? Buffer.from(await readlink(candidate.absolutePath), "utf8")
         : await readFile(candidate.absolutePath);
-      const hash = sha256(Buffer.concat([Buffer.from(`${candidate.kind}\0`), content]));
-      await this.storeBlob(hash, content);
-      files[validateRelativePath(candidate.relativePath)] = {
+      if (content.byteLength > MAX_FILE_BYTES) {
+        throw new Error(`Changed-files ledger disabled: ${candidate.ledgerPath} grew beyond the per-file limit ${MAX_FILE_BYTES}.`);
+      }
+      totalBytes += content.byteLength;
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        throw new Error(`Changed-files ledger disabled: workspace candidate content exceeds ${MAX_TOTAL_BYTES} total bytes.`);
+      }
+      loaded.push({ ...candidate, content });
+    }
+
+    const files: Record<string, FileState> = {};
+    for (const candidate of loaded) {
+      const hash = sha256(Buffer.concat([Buffer.from(`${candidate.kind}\0`), candidate.content]));
+      await this.storeBlob(hash, candidate.content);
+      files[candidate.ledgerPath] = {
         hash,
         kind: candidate.kind,
         mode: candidate.info.mode & 0o777,
-        size: content.byteLength,
+        size: candidate.content.byteLength,
       };
     }
     return this.storeSnapshot({ createdAt: new Date().toISOString(), files });
@@ -442,13 +600,21 @@ export class ChangedFilesLedger {
     return this.exclusive(async () => {
       if (!this.index) throw new Error("Ledger has not been initialized");
       const current = await this.captureSnapshot();
-      const files = changedPaths(current, target.snapshot).length;
-      const divergenceFiles = changedPaths(this.index.latest, current).length;
+      const divergence = await this.computeWorkspaceStats(this.index.latest, current);
+      const restoration = await this.computeWorkspaceStats(current, target.snapshot);
       return {
         target,
         current,
-        divergence: statsFromPatch(await this.createPatch(this.index.latest, current), divergenceFiles),
-        scope: { id: `restore:${target.id}:${target.action}`, label: target.label, before: current, after: target.snapshot, stats: statsFromPatch(await this.createPatch(current, target.snapshot), files) },
+        divergence: divergence.total,
+        divergenceRepositoryStats: divergence.repositories,
+        scope: {
+          id: `restore:${target.id}:${target.action}`,
+          label: target.label,
+          before: current,
+          after: target.snapshot,
+          stats: restoration.total,
+          repositoryStats: restoration.repositories,
+        },
       };
     });
   }
@@ -469,16 +635,20 @@ export class ChangedFilesLedger {
       if (changedPaths(before, preview.current).length > 0) throw new Error("Files changed after the restore preview; generate a new preview");
       if (changedPaths(before, preview.target.snapshot).length === 0) throw new Error("Restore target is already the current state");
 
+      // Validate every repository and every target blob before making the composite
+      // safety checkpoint durable. No affected repository can be silently omitted.
+      const prepared = await this.preflightRestore(before, preview.target.snapshot);
       const safetyCheckpoint = this.addCheckpoint("automatic", before, undefined, `Before restoring ${preview.target.label}`, preview.target.id);
       await this.saveIndex();
       try {
-        await this.restoreSnapshot(before, preview.target.snapshot);
+        await this.restoreSnapshot(before, preview.target.snapshot, prepared);
       } catch (error) {
         // A safety checkpoint is already durable. Also make a best-effort automatic
-        // recovery so an I/O failure does not leave a silently half-restored tree.
+        // recovery so an I/O failure does not leave a silently half-restored workspace.
         try {
           const partial = await this.captureSnapshot();
-          await this.restoreSnapshot(partial, before);
+          const recovery = await this.preflightRestore(partial, before);
+          await this.restoreSnapshot(partial, before, recovery);
           const recovered = await this.captureSnapshot();
           if (changedPaths(recovered, before).length > 0) throw new Error("recovery verification failed");
         } catch (recoveryError) {
@@ -488,6 +658,7 @@ export class ChangedFilesLedger {
       }
       const after = await this.captureSnapshot();
       if (changedPaths(after, preview.target.snapshot).length > 0) throw new Error("Restore verification failed");
+      const restorationStats = await this.computeWorkspaceStats(before, after);
       const turn: TurnRecord = {
         id: `restore-${turnIndex}-${timestamp}`,
         turnIndex,
@@ -495,7 +666,8 @@ export class ChangedFilesLedger {
         endedAt: new Date().toISOString(),
         before,
         after,
-        stats: statsFromPatch(await this.createPatch(before, after), changedPaths(before, after).length),
+        stats: restorationStats.total,
+        repositoryStats: restorationStats.repositories,
         kind: "restoration",
         restoration: { target: preview.target.label, action: preview.target.action, divergenceFiles: preview.divergence.files },
       };
@@ -576,13 +748,13 @@ export class ChangedFilesLedger {
     return this.exclusive(async () => {
       if (!this.index) throw new Error("Ledger has not been initialized");
       const after = await this.captureSnapshot();
-      const changed = changedPaths(draft.before, after);
-      const stats = statsFromPatch(await this.createPatch(draft.before, after), changed.length);
+      const stats = await this.computeWorkspaceStats(draft.before, after);
       const record: TurnRecord = {
         ...draft,
         endedAt: new Date(timestamp).toISOString(),
         after,
-        stats,
+        stats: stats.total,
+        repositoryStats: stats.repositories,
       };
       this.index.latest = after;
       this.index.reviewTurns.push(record);
@@ -609,7 +781,14 @@ export class ChangedFilesLedger {
     }
     const latest = this.index.reviewTurns.at(-1);
     if (!latest) return undefined;
-    return { id: "current", label: `Current turn · #${latest.turnIndex + 1}`, before: latest.before, after: latest.after, stats: latest.stats };
+    return {
+      id: "current",
+      label: `Current turn · #${latest.turnIndex + 1}`,
+      before: latest.before,
+      after: latest.after,
+      stats: latest.stats,
+      ...(latest.repositoryStats ? { repositoryStats: latest.repositoryStats } : {}),
+    };
   }
 
   scopes(draft?: { id: string; before: Snapshot }, live?: Snapshot): Scope[] {
@@ -625,6 +804,7 @@ export class ChangedFilesLedger {
         before: turn.before,
         after: turn.after,
         stats: turn.stats,
+        ...(turn.repositoryStats ? { repositoryStats: turn.repositoryStats } : {}),
       }));
     const sessionAfter = live ?? this.index.latest;
     const session: Scope = {
@@ -637,11 +817,21 @@ export class ChangedFilesLedger {
     return [...(current ? [current] : []), ...previous, session];
   }
 
+  async calculateWorkspaceStats(before: Snapshot, after: Snapshot): Promise<WorkspaceDiffStats> {
+    return this.exclusive(() => this.computeWorkspaceStats(before, after));
+  }
+
   async calculateStats(before: Snapshot, after: Snapshot): Promise<DiffStats> {
-    return this.exclusive(async () => {
-      const files = changedPaths(before, after).length;
-      return statsFromPatch(await this.createPatch(before, after), files);
-    });
+    return (await this.calculateWorkspaceStats(before, after)).total;
+  }
+
+  private async computeWorkspaceStats(before: Snapshot, after: Snapshot): Promise<WorkspaceDiffStats> {
+    const paths = changedPaths(before, after);
+    const patch = await this.createPatch(before, after);
+    return {
+      total: statsFromPatch(patch, paths.length),
+      repositories: repositoryStatsFromPatch(patch, paths, this.repositories),
+    };
   }
 
   async writePatch(scope: Scope): Promise<string> {
@@ -654,13 +844,22 @@ export class ChangedFilesLedger {
     });
   }
 
-  private async gitPaths(): Promise<string[]> {
-    const result = await this.pi.exec("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
-      cwd: this.root,
-      timeout: 2_000,
-    });
-    if (result.code !== 0) throw new Error(`git ls-files failed: ${result.stderr.trim()}`);
-    return [...new Set(result.stdout.split("\0").filter(Boolean))].sort();
+  private async gitPaths(): Promise<Array<{ repository: RepositoryDescriptor; relativePath: string; ledgerPath: string }>> {
+    const listings = await Promise.all(this.repositories.map(async (repository) => {
+      const result = await this.pi.exec("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
+        cwd: repository.root,
+        timeout: GIT_TIMEOUT_MS,
+      });
+      if (result.killed) throw new Error(`git ls-files timed out for repository ${repository.name}`);
+      if (result.code !== 0) throw new Error(`git ls-files failed for repository ${repository.name}: ${result.stderr.trim()}`);
+      const relativePaths = [...new Set(result.stdout.split("\0").filter(Boolean).map(validateRelativePath))].sort();
+      return relativePaths.map((relativePath) => ({
+        repository,
+        relativePath,
+        ledgerPath: validateRelativePath(repository.prefix ? `${repository.prefix}/${relativePath}` : relativePath),
+      }));
+    }));
+    return listings.flat().sort((left, right) => left.ledgerPath.localeCompare(right.ledgerPath));
   }
 
   private trimTurns(turns: TurnRecord[]): void {
@@ -725,29 +924,56 @@ export class ChangedFilesLedger {
     return content;
   }
 
-  private async restoreSnapshot(current: Snapshot, target: Snapshot): Promise<void> {
-    // Read and verify every required blob first, so corrupt storage cannot cause a partial restore.
+  private resolveLedgerPath(path: string): ResolvedLedgerPath {
+    const ledgerPath = validateRelativePath(path);
+    let repository: RepositoryDescriptor | undefined;
+    let relativePath = ledgerPath;
+    if (this.workspaceKind === "multi") {
+      const slash = ledgerPath.indexOf("/");
+      if (slash <= 0) throw new Error(`Workspace snapshot path is not repository-namespaced: ${ledgerPath}`);
+      const prefix = ledgerPath.slice(0, slash);
+      repository = this.repositories.find((candidate) => candidate.prefix === prefix);
+      relativePath = validateRelativePath(ledgerPath.slice(slash + 1));
+    } else {
+      repository = this.repositories[0];
+    }
+    if (!repository) throw new Error(`Workspace snapshot references an unknown repository: ${ledgerPath}`);
+    const absolutePath = resolve(repository.root, relativePath);
+    if (!absolutePath.startsWith(`${repository.root}${sep}`)) throw new Error(`Workspace snapshot path escapes repository ${repository.name}: ${ledgerPath}`);
+    return { repository, relativePath, absolutePath };
+  }
+
+  private async preflightRestore(current: Snapshot, target: Snapshot): Promise<PreparedRestore> {
+    await this.validateWorkspaceMembership();
+    const paths = new Map<string, ResolvedLedgerPath>();
+    for (const path of new Set([...Object.keys(current.files), ...Object.keys(target.files)])) {
+      const resolvedPath = this.resolveLedgerPath(path);
+      paths.set(path, resolvedPath);
+      await this.validateSafeParent(dirname(resolvedPath.absolutePath), resolvedPath.repository.root);
+    }
     const contents = new Map<string, Buffer>();
     for (const [path, file] of Object.entries(target.files)) {
-      validateRelativePath(path);
       contents.set(file.hash, await this.readBlob(file.hash, file.kind));
     }
-    for (const path of Object.keys(current.files)) validateRelativePath(path);
+    return { contents, paths };
+  }
 
+  private async restoreSnapshot(current: Snapshot, target: Snapshot, prepared: PreparedRestore): Promise<void> {
     const changed = changedPaths(current, target);
     const removals = changed.filter((path) => !target.files[path]).sort((a, b) => b.split("/").length - a.split("/").length);
-    for (const relativePath of removals) await this.removeLeaf(join(this.root, relativePath));
+    for (const path of removals) await this.removeLeaf(prepared.paths.get(path)!.absolutePath);
 
     const writes = changed.filter((path) => Boolean(target.files[path])).sort((a, b) => a.split("/").length - b.split("/").length);
-    for (const relativePath of writes) {
-      const destination = join(this.root, relativePath);
-      const file = target.files[relativePath]!;
-      await this.ensureSafeParent(dirname(destination));
-      const temporary = join(dirname(destination), `.pi-rollback-${process.pid}-${Date.now()}-${sha256(relativePath).slice(0, 8)}`);
+    for (const path of writes) {
+      const resolvedPath = prepared.paths.get(path)!;
+      const destination = resolvedPath.absolutePath;
+      const file = target.files[path]!;
+      await this.ensureSafeParent(dirname(destination), resolvedPath.repository.root);
+      const temporary = join(dirname(destination), `.pi-rollback-${process.pid}-${Date.now()}-${sha256(path).slice(0, 8)}`);
       await rm(temporary, { force: true });
-      if (file.kind === "symlink") await symlink(contents.get(file.hash)!.toString("utf8"), temporary);
+      if (file.kind === "symlink") await symlink(prepared.contents.get(file.hash)!.toString("utf8"), temporary);
       else {
-        await writeFile(temporary, contents.get(file.hash)!);
+        await writeFile(temporary, prepared.contents.get(file.hash)!);
         await chmod(temporary, file.mode);
       }
       await this.removeLeaf(destination);
@@ -756,7 +982,7 @@ export class ChangedFilesLedger {
   }
 
   private async removeLeaf(path: string): Promise<void> {
-    const info = await lstat(path).catch(() => undefined);
+    const info = await lstatOptional(path);
     if (!info) return;
     if (info.isDirectory()) {
       // Never recursively delete a directory: it may contain ignored or otherwise
@@ -767,12 +993,23 @@ export class ChangedFilesLedger {
     }
   }
 
-  private async ensureSafeParent(path: string): Promise<void> {
-    const relative = normalizePath(path.slice(this.root.length)).replace(/^\/+/, "");
-    let cursor = this.root;
+  private async validateSafeParent(path: string, repositoryRoot: string): Promise<void> {
+    const relative = normalizePath(path.slice(repositoryRoot.length)).replace(/^\/+/, "");
+    let cursor = repositoryRoot;
     for (const part of relative.split("/").filter(Boolean)) {
       cursor = join(cursor, part);
-      const info = await lstat(cursor).catch(() => undefined);
+      const info = await lstatOptional(cursor);
+      if (!info) return;
+      if (!info.isDirectory()) throw new Error(`Restore parent is not a directory: ${cursor}`);
+    }
+  }
+
+  private async ensureSafeParent(path: string, repositoryRoot: string): Promise<void> {
+    const relative = normalizePath(path.slice(repositoryRoot.length)).replace(/^\/+/, "");
+    let cursor = repositoryRoot;
+    for (const part of relative.split("/").filter(Boolean)) {
+      cursor = join(cursor, part);
+      const info = await lstatOptional(cursor);
       if (!info) await mkdir(cursor);
       else if (!info.isDirectory()) throw new Error(`Restore parent is not a directory: ${cursor}`);
     }
@@ -781,9 +1018,9 @@ export class ChangedFilesLedger {
   private async materialize(snapshot: Snapshot, destination: string): Promise<void> {
     await mkdir(destination, { recursive: true });
     for (const [relativePath, file] of Object.entries(snapshot.files)) {
-      const target = join(destination, relativePath);
+      const target = join(destination, validateRelativePath(relativePath));
       await mkdir(dirname(target), { recursive: true });
-      const content = await this.readBlob(file.hash);
+      const content = await this.readBlob(file.hash, file.kind);
       if (file.kind === "symlink") await symlink(content.toString("utf8"), target);
       else {
         await writeFile(target, content);
@@ -801,7 +1038,7 @@ export class ChangedFilesLedger {
       ]);
       const result = await this.pi.exec(
         "git",
-        ["diff", "--no-index", "--binary", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--", "before", "after"],
+        ["-c", "core.quotePath=false", "diff", "--no-index", "--binary", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--", "before", "after"],
         { cwd: temporary, timeout: 60_000 },
       );
       if (result.code !== 0 && result.code !== 1) throw new Error(`git diff --no-index failed: ${result.stderr.trim()}`);
@@ -822,6 +1059,8 @@ export class ChangedFilesLedger {
           ...parsed,
           version: INDEX_VERSION,
           turns: undefined,
+          workspaceKind: "single",
+          repositories: this.repositories,
           baseline: await migrate(parsed.baseline),
           latest: await migrate(parsed.latest),
           reviewTurns: await Promise.all(parsed.turns.map(async (turn: any) => ({
@@ -837,7 +1076,7 @@ export class ChangedFilesLedger {
           checkpoints: [],
         } as LedgerIndex;
       }
-      if (parsed.version !== 2 && parsed.version !== INDEX_VERSION) return undefined;
+      if (parsed.version !== 2 && parsed.version !== 3 && parsed.version !== INDEX_VERSION) return undefined;
       const loadTurns = (turns: any[]) => Promise.all((turns ?? []).map(async (turn: any) => ({
         ...turn,
         before: await this.readSnapshot(turn.before),
@@ -848,6 +1087,8 @@ export class ChangedFilesLedger {
         ...parsed,
         version: INDEX_VERSION,
         turns: undefined,
+        workspaceKind: parsed.workspaceKind ?? "single",
+        repositories: parsed.repositories ?? this.repositories,
         baseline: await this.readSnapshot(parsed.baseline),
         latest: await this.readSnapshot(parsed.latest),
         reviewTurns: await loadTurns(parsed.reviewTurns ?? legacyTurns),
@@ -968,6 +1209,46 @@ export function diffStats(before: Snapshot, after: Snapshot): DiffStats {
   return stats;
 }
 
+export function repositoryStatsFromPatch(
+  patch: string,
+  changed: readonly string[],
+  repositories: readonly RepositoryDescriptor[],
+): Record<string, DiffStats> {
+  const result = Object.fromEntries(repositories.map((repository) => [repository.name, emptyStats()]));
+  const repositoryForPath = (path: string): RepositoryDescriptor | undefined => {
+    if (repositories.length === 1 && repositories[0]?.prefix === "") return repositories[0];
+    return repositories.find((repository) => path.startsWith(`${repository.prefix}/`));
+  };
+  for (const path of changed) {
+    const repository = repositoryForPath(path);
+    if (!repository) throw new Error(`Changed path is not namespaced to a workspace repository: ${path}`);
+    result[repository.name]!.files += 1;
+  }
+
+  let current: DiffStats | undefined;
+  let inHunk = false;
+  let currentFileIsBinary = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const repository = repositories.length === 1 && repositories[0]?.prefix === ""
+        ? repositories[0]
+        : repositories.find((candidate) => line.includes(`a/${candidate.prefix}/`) || line.includes(`b/${candidate.prefix}/`));
+      if (!repository) throw new Error(`Patch file is not namespaced to a workspace repository: ${line}`);
+      current = result[repository.name];
+      inHunk = false;
+      currentFileIsBinary = false;
+    } else if (current && (line.startsWith("Binary files ") || line === "GIT binary patch")) {
+      if (!currentFileIsBinary) current.binary += 1;
+      currentFileIsBinary = true;
+      inHunk = false;
+    } else if (line.startsWith("@@ ")) {
+      inHunk = true;
+    } else if (current && inHunk && line.startsWith("+")) current.additions += 1;
+    else if (current && inHunk && line.startsWith("-")) current.deletions += 1;
+  }
+  return result;
+}
+
 export function statsFromPatch(patch: string, files: number): DiffStats {
   let additions = 0;
   let deletions = 0;
@@ -991,11 +1272,21 @@ export function statsFromPatch(patch: string, files: number): DiffStats {
 }
 
 export function normalizeMaterializedPatch(patch: string): string {
-  return patch
-    .replaceAll("a/before/", "a/")
-    .replaceAll("a/after/", "a/")
-    .replaceAll("b/before/", "b/")
-    .replaceAll("b/after/", "b/");
+  return patch.split("\n").map((line) => {
+    if (!line.startsWith("diff --git ") && !line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("Binary files ")) return line;
+    return line
+      .replaceAll("a/before/", "a/")
+      .replaceAll("a/after/", "a/")
+      .replaceAll("b/before/", "b/")
+      .replaceAll("b/after/", "b/");
+  }).join("\n");
+}
+
+export function formatRepositoryStats(stats: Record<string, DiffStats>): string {
+  return Object.entries(stats)
+    .filter(([, value]) => value.files > 0)
+    .map(([repository, value]) => `${repository}: ${formatStats(value)}`)
+    .join(" · ");
 }
 
 export function formatStats(stats: DiffStats): string {

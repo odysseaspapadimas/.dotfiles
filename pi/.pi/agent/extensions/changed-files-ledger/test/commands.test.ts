@@ -80,12 +80,27 @@ test("restore action summary discloses actual-current stats, divergence, scope, 
       target: { id: "turn-2", label: "changes from response to “fix auth”", action: "undo", snapshot: target },
       current,
       divergence: { files: 1, additions: 2, deletions: 3, binary: 0 },
-      scope: { id: "restore", label: "restore", before: current, after: target, stats: { files: 4, additions: 5, deletions: 6, binary: 0 } },
+      divergenceRepositoryStats: {
+        frontend: { files: 1, additions: 2, deletions: 3, binary: 0 },
+        backend: { files: 0, additions: 0, deletions: 0, binary: 0 },
+      },
+      scope: {
+        id: "restore",
+        label: "restore",
+        before: current,
+        after: target,
+        stats: { files: 4, additions: 5, deletions: 6, binary: 0 },
+        repositoryStats: {
+          frontend: { files: 3, additions: 4, deletions: 5, binary: 0 },
+          backend: { files: 1, additions: 1, deletions: 1, binary: 0 },
+        },
+      },
     },
   );
   assert.match(summary, /Restore target: changes from response/);
   assert.match(summary, /Actual current → target: 4f · \+5 −6/);
-  assert.match(summary, /External\/unrecorded divergence: 1f · \+2 −3/);
+  assert.match(summary, /Per repository: frontend: 3f · \+4 −5 · backend: 1f · \+1 −1/);
+  assert.match(summary, /External\/unrecorded divergence: 1f · \+2 −3 \(frontend: 1f · \+2 −3\)/);
   assert.match(summary, /Ignored files, submodule contents, directories, and special files are excluded/);
   assert.match(summary, /automatic checkpoint.*restores exactly, verifies, and records an audit marker/);
 });

@@ -26,6 +26,7 @@ const panes = new Map<string, Pane>();
 let registered: any;
 const eventHandlers = new Map<string, (...args: any[]) => unknown>();
 let nextRuntime = 1;
+const herdrCalls: string[][] = [];
 
 function output(result: unknown = {}) {
   return { code: 0, stdout: `${JSON.stringify({ result })}\n`, stderr: "", killed: false };
@@ -62,6 +63,7 @@ const fakePi: any = {
   },
   async exec(command: string, args: string[]) {
     assert.equal(command, "herdr");
+    herdrCalls.push([...args]);
     if (args[0] === "api" && args[1] === "snapshot") return output({ snapshot: { panes: [...panes.values()] } });
     if (args[0] === "pane" && args[1] === "process-info") return output({ process_info: { pane_id: args[3], foreground_processes: [] } });
     if (args[0] === "tab" && args[1] === "create") {
@@ -114,10 +116,11 @@ const fakePi: any = {
   },
 };
 
-function execute(params: Record<string, unknown>) {
+function execute(params: Record<string, unknown>, sessionManager?: InstanceType<typeof SessionManager>) {
   return registered.execute("test-call", params, undefined, undefined, {
     cwd: root,
     model: { provider: "test-provider", id: "test-model" },
+    sessionManager,
   });
 }
 
@@ -174,11 +177,22 @@ try {
   result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
   assert.match(result.content[0].text, /historical\/stopped/);
 
-  result = await execute({ action: "create", name: "Lifecycle", message: "start", cwd: root });
+  result = await execute({ action: "create", name: "Lifecycle", message: "start", cwd: root }, SessionManager.open(externalPath));
   const created = result.details.session;
   assert.match(created.id, /^dir_[0-9a-f]{32}$/);
   assert.equal(created.name, "Lifecycle");
   assert.match(result.content[0].text, /Starting message sent/);
+  const createdMetadata = SessionManager.open(created.sessionPath).getEntries().findLast(
+    (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+  )?.data;
+  assert.equal(createdMetadata.parentSessionId, external.getSessionId());
+  assert.equal(createdMetadata.delegationDepth, 1);
+  const promptEvent = eventHandlers.get("before_agent_start")?.(
+    { systemPrompt: "base prompt" },
+    { sessionManager: SessionManager.open(created.sessionPath) },
+  ) as { systemPrompt?: string };
+  assert.match(promptEvent.systemPrompt ?? "", /owns its assigned task \(delegation depth 1\)/);
+  assert.doesNotMatch(promptEvent.systemPrompt ?? "", /User:|Assistant:/);
 
   result = await execute({ action: "list" });
   assert.match(result.content[0].text, /Lifecycle/);
@@ -232,6 +246,10 @@ try {
   assert.match(result.content[0].text, /Focused/);
 
   await execute({ action: "stop", id: created.id });
+  assert.ok(
+    herdrCalls.some((args) => args[0] === "tab" && args[1] === "close" && args[2] === "w-test:moved-tab"),
+    "stop must close the managed tab so watch cannot retain a stale idle runtime",
+  );
   result = await execute({ action: "status", id: created.id });
   assert.match(result.content[0].text, /Status: stopped/);
 

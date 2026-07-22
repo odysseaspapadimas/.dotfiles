@@ -19,6 +19,7 @@ import {
   ChangedFilesLedger,
   changedPaths,
   emptyStats,
+  formatRepositoryStats,
   formatStats,
 } from "./src/ledger.js";
 
@@ -163,12 +164,15 @@ export function recoveryPruneDisclosure(report: RecoveryHistoryReport): string {
 }
 
 export function formatRestoreActionSummary(target: RestoreTarget, preview: RollbackPreview): string {
+  const divergenceRepositories = preview.divergenceRepositoryStats ? formatRepositoryStats(preview.divergenceRepositoryStats) : "";
   const divergence = preview.divergence.files
-    ? `External/unrecorded divergence: ${formatStats(preview.divergence)} (included in restore and safety checkpoint).`
+    ? `External/unrecorded divergence: ${formatStats(preview.divergence)}${divergenceRepositories ? ` (${divergenceRepositories})` : ""} (included in restore and safety checkpoint).`
     : "External/unrecorded divergence: none detected.";
+  const repositories = preview.scope.repositoryStats ? formatRepositoryStats(preview.scope.repositoryStats) : "";
   return [
     `Restore target: ${target.label}`,
     `Actual current → target: ${formatStats(preview.scope.stats)}`,
+    ...(repositories ? [`Per repository: ${repositories}`] : []),
     divergence,
     "Scope: tracked and non-ignored untracked regular files/symlinks. Ignored files, submodule contents, directories, and special files are excluded.",
     "Safety: Restore now first captures an automatic checkpoint, then restores exactly, verifies, and records an audit marker.",
@@ -206,6 +210,8 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
   let live: Snapshot | undefined;
   let currentStats: DiffStats = emptyStats();
   let sessionStats: DiffStats = emptyStats();
+  let currentRepositoryStats: Record<string, DiffStats> = {};
+  let sessionRepositoryStats: Record<string, DiffStats> = {};
   let widgetHidden = false;
   let disabledReason: string | undefined;
   let pendingRestore: { target: RestoreTarget; preview: RollbackPreview } | undefined;
@@ -245,23 +251,43 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
       ctx.ui.setStatus(WIDGET_ID, undefined);
       return;
     }
-    const line = [
-      formatWidgetStats(ctx, "turn", currentStats, "accent"),
+    const lines = [[
+      formatWidgetStats(ctx, ledger?.workspaceKind === "multi" ? "workspace turn" : "turn", currentStats, "accent"),
       ctx.ui.theme.fg("dim", "│"),
-      formatWidgetStats(ctx, "session", sessionStats, "muted"),
-    ].join(" ");
+      formatWidgetStats(ctx, ledger?.workspaceKind === "multi" ? "workspace session" : "session", sessionStats, "muted"),
+    ].join(" ")];
+    if (ledger?.workspaceKind === "multi") {
+      for (const repository of ledger.repositories) {
+        const turn = currentRepositoryStats[repository.name] ?? emptyStats();
+        const session = sessionRepositoryStats[repository.name] ?? emptyStats();
+        if (!hasVisibleChanges(turn, session)) continue;
+        lines.push([
+          formatWidgetStats(ctx, `${repository.name} turn`, turn, "accent"),
+          ctx.ui.theme.fg("dim", "│"),
+          formatWidgetStats(ctx, `${repository.name} session`, session, "muted"),
+        ].join(" "));
+      }
+    }
     ctx.ui.setStatus(WIDGET_ID, undefined);
-    ctx.ui.setWidget(WIDGET_ID, [line]);
+    ctx.ui.setWidget(WIDGET_ID, lines);
   }
 
   async function refreshStats(ctx: ExtensionContext): Promise<void> {
     await initialized;
     if (!ledger?.index) return;
     const latest = live ?? ledger.index.latest;
-    currentStats = draft
-      ? await ledger.calculateStats(draft.before, latest)
-      : ledger.currentScope(undefined, latest)?.stats ?? emptyStats();
-    sessionStats = await ledger.calculateStats(ledger.index.baseline, latest);
+    if (draft) {
+      const current = await ledger.calculateWorkspaceStats(draft.before, latest);
+      currentStats = current.total;
+      currentRepositoryStats = current.repositories;
+    } else {
+      const current = ledger.currentScope(undefined, latest);
+      currentStats = current?.stats ?? emptyStats();
+      currentRepositoryStats = current?.repositoryStats ?? {};
+    }
+    const session = await ledger.calculateWorkspaceStats(ledger.index.baseline, latest);
+    sessionStats = session.total;
+    sessionRepositoryStats = session.repositories;
     updateWidget(ctx);
   }
 
@@ -272,6 +298,8 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
     pendingRestore = undefined;
     currentStats = emptyStats();
     sessionStats = emptyStats();
+    currentRepositoryStats = {};
+    sessionRepositoryStats = {};
     ledger = new ChangedFilesLedger(pi, ctx.sessionManager.getSessionId(), ctx.cwd);
     viewer = new HunkHerdrViewer(
       pi,
@@ -306,6 +334,7 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
     nextTurnIndex += 1;
     live = draft.before;
     currentStats = emptyStats();
+    currentRepositoryStats = {};
     updateWidget(ctx);
   });
 
@@ -317,13 +346,17 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
       draft = undefined;
       live = record.after;
       currentStats = record.stats;
-      sessionStats = await ledger.calculateStats(ledger.index!.baseline, record.after);
+      currentRepositoryStats = record.repositoryStats ?? {};
+      const session = await ledger.calculateWorkspaceStats(ledger.index!.baseline, record.after);
+      sessionStats = session.total;
+      sessionRepositoryStats = session.repositories;
       pi.appendEntry(ENTRY_TYPE, {
         cacheKey: ledger.sessionKey,
         root: ledger.root,
         turnId: record.id,
         turnIndex: record.turnIndex,
         stats: record.stats,
+        repositoryStats: record.repositoryStats,
       });
       updateWidget(ctx);
     } catch (error) {
@@ -455,13 +488,17 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
     const result = await activeLedger.rollback(preview, { confirmed: true }, nextTurnIndex++);
     live = result.turn.after;
     currentStats = result.turn.stats;
-    sessionStats = await activeLedger.calculateStats(activeLedger.index!.baseline, result.turn.after);
+    currentRepositoryStats = result.turn.repositoryStats ?? {};
+    const session = await activeLedger.calculateWorkspaceStats(activeLedger.index!.baseline, result.turn.after);
+    sessionStats = session.total;
+    sessionRepositoryStats = session.repositories;
     pi.appendEntry(ENTRY_TYPE, {
       cacheKey: activeLedger.sessionKey,
       root: activeLedger.root,
       turnId: result.turn.id,
       turnIndex: result.turn.turnIndex,
       stats: result.turn.stats,
+      repositoryStats: result.turn.repositoryStats,
       restoration: { target: target.label, action: target.action, divergenceFiles: preview.divergence.files, safetyCheckpoint: result.safetyCheckpoint.id, safetyLabel: checkpointDisplayName(result.safetyCheckpoint) },
     });
     updateWidget(ctx);
@@ -715,6 +752,8 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
           live = await ledger.resetBaseline();
           currentStats = emptyStats();
           sessionStats = emptyStats();
+          currentRepositoryStats = {};
+          sessionRepositoryStats = {};
           updateWidget(ctx);
           ctx.ui.notify("Diff review cleared. Current files are now the review baseline; retained restoration history and checkpoints were preserved.", "info");
         } catch (error) {
@@ -728,19 +767,26 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
         const scopes = ledger.scopes(draft, live);
         const currentScope = scopes.find((scope) => scope.id === "current");
         if (draft && currentScope) {
-          currentScope.stats = await ledger.calculateStats(currentScope.before, currentScope.after);
+          const calculated = await ledger.calculateWorkspaceStats(currentScope.before, currentScope.after);
+          currentScope.stats = calculated.total;
+          currentScope.repositoryStats = calculated.repositories;
         }
         const sessionScope = scopes.find((scope) => scope.id === "session");
         if (sessionScope) {
           if (changedPaths(previousLatest, live).length > 0) {
-            sessionStats = await ledger.calculateStats(sessionScope.before, sessionScope.after);
+            const calculated = await ledger.calculateWorkspaceStats(sessionScope.before, sessionScope.after);
+            sessionStats = calculated.total;
+            sessionRepositoryStats = calculated.repositories;
           }
           sessionScope.stats = sessionStats;
+          sessionScope.repositoryStats = sessionRepositoryStats;
         }
         const visibleScopes = scopes.filter((scope) => scope.stats.files > 0);
         if (visibleScopes.length === 0) {
           currentStats = emptyStats();
           sessionStats = emptyStats();
+          currentRepositoryStats = {};
+          sessionRepositoryStats = {};
           updateWidget(ctx);
           ctx.ui.notify("No file changes recorded for this session", "info");
           return;
@@ -748,7 +794,7 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
         const items: SelectItem[] = visibleScopes.map((scope) => ({
           value: scope.id,
           label: scope.label,
-          description: formatStats(scope.stats),
+          description: [formatStats(scope.stats), scope.repositoryStats ? formatRepositoryStats(scope.repositoryStats) : ""].filter(Boolean).join(" · "),
         }));
         const selected = await ctx.ui.custom<ScopeSelection | null>((tui, theme, _keybindings, done) => {
           const container = new Container();
@@ -795,8 +841,12 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
           return;
         }
         const opened = await viewer.openOrReuse(ledger.root, patchPath, selected.target);
-        currentStats = scopes.find((candidate) => candidate.id === "current")?.stats ?? emptyStats();
-        sessionStats = scopes.find((candidate) => candidate.id === "session")?.stats ?? emptyStats();
+        const selectedCurrent = scopes.find((candidate) => candidate.id === "current");
+        const selectedSession = scopes.find((candidate) => candidate.id === "session");
+        currentStats = selectedCurrent?.stats ?? emptyStats();
+        currentRepositoryStats = selectedCurrent?.repositoryStats ?? {};
+        sessionStats = selectedSession?.stats ?? emptyStats();
+        sessionRepositoryStats = selectedSession?.repositoryStats ?? {};
         updateWidget(ctx);
         ctx.ui.notify(
           `${opened.reused ? "Updated" : "Opened"} Hunk in focused ${opened.target} ${opened.target === "tab" ? opened.tabId : opened.paneId}: ${scope.label}`,
