@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { createReadStream } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, relative, resolve } from "node:path";
@@ -51,8 +51,7 @@ interface ParsedReviewArgs {
 
 interface ReviewSuccess {
 	ok: true;
-	state: ReviewState;
-	report: string;
+	reviews: Array<{ state: ReviewState; report: string }>;
 }
 
 interface ReviewFailure {
@@ -62,7 +61,7 @@ interface ReviewFailure {
 
 type ReviewOutcome = ReviewSuccess | ReviewFailure;
 
-let latestReview: ReviewState | undefined;
+let latestReviews: ReviewState[] = [];
 let pinnedCodexPath: string | undefined;
 
 function errorMessage(error: unknown): string {
@@ -172,6 +171,50 @@ async function resolveGitRoot(pi: ExtensionAPI, cwd: string, signal: AbortSignal
 	const root = (await run(pi, "git", ["rev-parse", "--show-toplevel"], cwd, signal)).trim();
 	if (!root) throw new Error("Not inside a git worktree.");
 	return realpathSync(root);
+}
+
+function discoverGitRoots(directory: string, signal: AbortSignal): string[] {
+	const roots: string[] = [];
+	const visit = (path: string) => {
+		throwIfAborted(signal);
+		let entries;
+		try {
+			entries = readdirSync(path, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		if (entries.some((entry) => entry.name === ".git")) {
+			roots.push(realpathSync(path));
+			return; // Treat nested worktrees/submodules as part of their containing repository.
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory() && !entry.isSymbolicLink()) visit(join(path, entry.name));
+		}
+	};
+	visit(realpathSync(directory));
+	return roots.sort();
+}
+
+async function resolveReviewRoots(
+	pi: ExtensionAPI,
+	cwd: string,
+	target: ReviewTarget,
+	signal: AbortSignal,
+): Promise<string[]> {
+	try {
+		return [await resolveGitRoot(pi, cwd, signal)];
+	} catch (error) {
+		if (target.kind !== "uncommitted") throw error;
+		const roots = discoverGitRoots(cwd, signal);
+		if (!roots.length) throw new Error("Not inside a git worktree, and no Git repositories were found below the current folder.");
+		const changed: string[] = [];
+		for (const root of roots) {
+			const status = await run(pi, "git", ["status", "--porcelain=v1", "--untracked-files=all"], root, signal);
+			if (status.trim()) changed.push(root);
+		}
+		if (!changed.length) throw new Error(`Found ${roots.length} Git ${roots.length === 1 ? "repository" : "repositories"}, but none has uncommitted changes.`);
+		return changed;
+	}
 }
 
 async function resolveCommit(pi: ExtensionAPI, root: string, ref: string, signal: AbortSignal): Promise<string> {
@@ -292,12 +335,15 @@ function validateState(value: unknown): value is ReviewState {
 }
 
 function restoreState(ctx: ExtensionContext): void {
-	latestReview = undefined;
+	latestReviews = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue;
-		const data = entry.data as { action?: unknown; state?: unknown } | undefined;
-		if (data?.action === "clear") latestReview = undefined;
-		else if (data?.action === "save" && validateState(data.state)) latestReview = data.state;
+		const data = entry.data as { action?: unknown; state?: unknown; states?: unknown } | undefined;
+		if (data?.action === "clear") latestReviews = [];
+		else if (data?.action === "save") {
+			if (Array.isArray(data.states) && data.states.every(validateState)) latestReviews = data.states;
+			else if (validateState(data.state)) latestReviews = [data.state]; // Backward compatibility.
+		}
 	}
 }
 
@@ -309,46 +355,40 @@ async function executeReview(
 ): Promise<ReviewOutcome> {
 	try {
 		const codexPath = findExecutable("codex");
-		const root = await resolveGitRoot(pi, ctx.cwd, signal);
-		if (isInside(root, codexPath)) {
-			throw new Error(`Refusing to execute a repository-controlled Codex binary: ${codexPath}`);
-		}
-
-		const [{ fingerprint, head, resolvedTarget }, versionOutput] = await Promise.all([
-			computeFingerprint(pi, root, target, signal),
-			run(pi, codexPath, ["--version"], root, signal),
-		]);
+		const roots = await resolveReviewRoots(pi, ctx.cwd, target, signal);
+		const versionOutput = await run(pi, codexPath, ["--version"], roots[0], signal);
 		const codexVersion = stripAnsi(versionOutput).trim();
-		const result = await pi.exec(codexPath, codexArgs(target), {
-			cwd: root,
-			signal,
-			timeout: REVIEW_TIMEOUT_MS,
-		});
-		throwIfAborted(signal);
-		if (result.code !== 0) {
-			const details = stripAnsi((result.stderr || result.stdout || "").trim()).slice(-8_000);
-			throw new Error(`Codex review failed (exit ${result.code})${details ? `:\n${details}` : ""}`);
-		}
+		const reviews: Array<{ state: ReviewState; report: string }> = [];
 
-		const report = stripAnsi(result.stdout.trim() || result.stderr.trim());
-		if (!report) throw new Error("Codex review completed without producing a report.");
-		const reportPath = saveReport(report);
-		const reportPreview = truncateHead(report, { maxBytes: REPORT_PREVIEW_BYTES, maxLines: DEFAULT_MAX_LINES }).content;
-		const state: ReviewState = {
-			version: STATE_VERSION,
-			cwd: ctx.cwd,
-			gitRoot: root,
-			target,
-			resolvedTarget,
-			head,
-			fingerprint,
-			reportPath,
-			reportPreview,
-			codexPath,
-			codexVersion,
-			createdAt: Date.now(),
-		};
-		return { ok: true, state, report };
+		for (const root of roots) {
+			if (isInside(root, codexPath)) {
+				throw new Error(`Refusing to execute a repository-controlled Codex binary: ${codexPath}`);
+			}
+			const { fingerprint, head, resolvedTarget } = await computeFingerprint(pi, root, target, signal);
+			const result = await pi.exec(codexPath, codexArgs(target), {
+				cwd: root,
+				signal,
+				timeout: REVIEW_TIMEOUT_MS,
+			});
+			throwIfAborted(signal);
+			if (result.code !== 0) {
+				const details = stripAnsi((result.stderr || result.stdout || "").trim()).slice(-8_000);
+				throw new Error(`Codex review failed in ${root} (exit ${result.code})${details ? `:\n${details}` : ""}`);
+			}
+
+			const report = stripAnsi(result.stdout.trim() || result.stderr.trim());
+			if (!report) throw new Error(`Codex review completed without producing a report for ${root}.`);
+			const reportPath = saveReport(report);
+			const reportPreview = truncateHead(report, { maxBytes: REPORT_PREVIEW_BYTES, maxLines: DEFAULT_MAX_LINES }).content;
+			reviews.push({
+				report,
+				state: {
+					version: STATE_VERSION, cwd: ctx.cwd, gitRoot: root, target, resolvedTarget, head,
+					fingerprint, reportPath, reportPreview, codexPath, codexVersion, createdAt: Date.now(),
+				},
+			});
+		}
+		return { ok: true, reviews };
 	} catch (error) {
 		if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
 			return { ok: false, error: "Cancelled" };
@@ -407,25 +447,29 @@ async function requestFix(
 	ctx: ExtensionCommandContext,
 	options: { yes: boolean; force: boolean },
 ): Promise<void> {
-	const state = latestReview;
-	if (!state) {
+	const states = latestReviews;
+	if (!states.length) {
 		ctx.ui.notify("No saved Codex review. Run /codex-review first.", "warning");
 		return;
 	}
 
 	const signal = AbortSignal.timeout(FINGERPRINT_TIMEOUT_MS);
-	let root: string;
-	let current: { fingerprint: string; head: string; resolvedTarget?: string };
+	const currentFingerprints = new Map<string, string>();
 	try {
-		root = await resolveGitRoot(pi, ctx.cwd, signal);
-		if (root !== state.gitRoot) throw new Error(`The saved review belongs to ${state.gitRoot}, not ${root}.`);
-		current = await computeFingerprint(pi, root, state.target, signal);
+		for (const state of states) {
+			if (!isInside(realpathSync(ctx.cwd), state.gitRoot) && realpathSync(ctx.cwd) !== state.cwd) {
+				throw new Error(`The saved review for ${state.gitRoot} does not belong to the current folder.`);
+			}
+			const current = await computeFingerprint(pi, state.gitRoot, state.target, signal);
+			currentFingerprints.set(state.gitRoot, current.fingerprint);
+		}
 	} catch (error) {
 		ctx.ui.notify(errorMessage(error), "error");
 		return;
 	}
 
-	if (current.fingerprint !== state.fingerprint && !options.force) {
+	const stale = states.filter((state) => currentFingerprints.get(state.gitRoot) !== state.fingerprint);
+	if (stale.length && !options.force) {
 		ctx.ui.notify("Repository state changed since the review. Re-run /codex-review, or use /codex-review-fix --force.", "warning");
 		return;
 	}
@@ -437,19 +481,19 @@ async function requestFix(
 		}
 		const confirmed = await ctx.ui.confirm(
 			"Apply reviewed fixes?",
-			`Ask Pi to validate and fix findings for ${targetLabel(state.target)}? No commits or pushes will be performed.`,
+			`Ask Pi to validate and fix findings from ${states.length} ${states.length === 1 ? "repository" : "repositories"}? No commits or pushes will be performed.`,
 		);
 		if (!confirmed) return;
 	}
 
-	const report = readSavedReport(state);
-	const inline = truncateHead(report, { maxBytes: FIX_INLINE_BYTES, maxLines: DEFAULT_MAX_LINES });
+	const combined = states.map((state) => `Repository: ${state.gitRoot}\nReviewed HEAD: ${state.head}\nFull saved report: ${state.reportPath}\n\n${readSavedReport(state)}`).join("\n\n--- NEXT REPOSITORY ---\n\n");
+	const inline = truncateHead(combined, { maxBytes: FIX_INLINE_BYTES, maxLines: DEFAULT_MAX_LINES });
 	const reportSection = inline.truncated
-		? `${inline.content}\n\n[The report is truncated here. Read the complete report from ${state.reportPath} before finishing.]`
+		? `${inline.content}\n\n[The reports are truncated here. Read the complete reports from the paths listed above before finishing.]`
 		: inline.content;
-	const staleNote = current.fingerprint === state.fingerprint
-		? "The repository fingerprint still matches the reviewed state."
-		: "The user explicitly forced use of a stale review. Re-check every finding against the current files before editing.";
+	const staleNote = stale.length === 0
+		? "All repository fingerprints still match the reviewed state."
+		: "The user explicitly forced use of stale reviews. Re-check every finding against the current files before editing.";
 
 	pi.sendUserMessage(`Apply the actionable findings from the saved Codex review below.
 
@@ -462,10 +506,9 @@ Safety requirements:
 - Do not commit, push, merge, reset, or rewrite history.
 - Finish with a concise list of accepted fixes, dismissed findings, and verification performed.
 
-Review target: ${targetLabel(state.target)}
-Reviewed HEAD: ${state.head}
+Review target: ${targetLabel(states[0].target)}
+Repositories reviewed: ${states.map((state) => state.gitRoot).join(", ")}
 ${staleNote}
-Full saved report: ${state.reportPath}
 
 --- BEGIN CODEX REVIEW ---
 ${reportSection}
@@ -516,10 +559,10 @@ export default function codexReviewExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			latestReview = outcome.state;
-			pi.appendEntry(STATE_TYPE, { action: "save", state: outcome.state });
-			displayReport(pi, outcome.state, outcome.report);
-			ctx.ui.notify(`Codex review complete. Saved to ${outcome.state.reportPath}`, "info");
+			latestReviews = outcome.reviews.map(({ state }) => state);
+			pi.appendEntry(STATE_TYPE, { action: "save", states: latestReviews });
+			for (const { state, report } of outcome.reviews) displayReport(pi, state, report);
+			ctx.ui.notify(`Codex review complete for ${outcome.reviews.length} ${outcome.reviews.length === 1 ? "repository" : "repositories"}.`, "info");
 			if (parsed.fix) await requestFix(pi, ctx, { yes: parsed.yes, force: false });
 		},
 	});
@@ -544,7 +587,7 @@ export default function codexReviewExtension(pi: ExtensionAPI) {
 	pi.registerCommand("codex-review-clear", {
 		description: "Forget the latest saved Codex review for this session branch",
 		handler: async (_args, ctx) => {
-			latestReview = undefined;
+			latestReviews = [];
 			pi.appendEntry(STATE_TYPE, { action: "clear" });
 			ctx.ui.notify("Saved Codex review cleared.", "info");
 		},

@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.81.1",
+  "lastChangelogVersion": "0.82.0",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "low",
@@ -17,5 +17,6 @@
     "npm:@juicesharp/rpiv-todo"
   ],
   "quietStartup": false,
-  "steeringMode": "one-at-a-time"
+  "steeringMode": "one-at-a-time",
+  "doubleEscapeAction": "tree"
 }

@@ -1,7 +1,6 @@
 import { access, mkdir, readFile, realpath, rm, stat, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type ExtensionAPI, type ExtensionCommandContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
@@ -10,7 +9,6 @@ const SOURCE_TAB_ID = process.env.HERDR_TAB_ID;
 const SOURCE_PANE_ID = process.env.HERDR_PANE_ID;
 const LABEL = "File viewer";
 const MAX_OVERLAY_BYTES = 2 * 1024 * 1024;
-const VIEWER_INIT = join(dirname(fileURLToPath(import.meta.url)), "viewer-init.lua");
 const PLUGIN_ROOT = join(homedir(), ".local", "share", "pi-file-viewer");
 const PLUGINS = [
   { name: "mini.nvim", url: "https://github.com/nvim-mini/mini.nvim.git", revision: "a35f08f63b73f0ffac045cd175fb2a22e167c39c", marker: "lua/mini/pick.lua" },
@@ -118,7 +116,7 @@ class HerdrViewer {
     } else {
       await unlink(viewer.socket).catch(() => undefined);
       const command = [
-        "nvim", "-u", shellQuote(VIEWER_INIT), "--listen", shellQuote(viewer.socket),
+        "nvim", "--listen", shellQuote(viewer.socket),
         location?.line ? `+${location.line}` : "",
         location ? shellQuote(location.path) : shellQuote(`+${pickerCommand(root)}`),
       ].filter(Boolean).join(" ");

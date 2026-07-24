@@ -16,6 +16,7 @@ yellow = "#eed49f"
 prefix = "ctrl+space"
 
 [ui]
+mobile_width_threshold = 80
 agent_panel_sort = "spaces"
 show_agent_labels_on_pane_borders = false
 sidebar_width = 30
@@ -62,6 +63,14 @@ command = "ports"
 width = "82%"
 height = "82%"
 description = "development ports"
+
+[[keys.command]]
+key = "prefix+a"
+type = "popup"
+command = "project-scripts"
+width = "82%"
+height = "82%"
+description = "project scripts"
 
 [[keys.command]]
 key = "prefix+comma"

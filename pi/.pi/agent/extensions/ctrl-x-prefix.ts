@@ -35,7 +35,6 @@ const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   b: { label: "side chat", command: "/side", preserveDraft: true },
   d: { label: "diff", command: "/diff", preserveDraft: true },
   f: { label: "file viewer", command: "/view", preserveDraft: true },
-  x: { label: "package scripts", command: "/scripts", preserveDraft: true },
   p: { label: "scratch", command: "/scratch", preserveDraft: true },
   z: { label: "restore files", command: "/restore", preserveDraft: true },
   j: { label: "side summary", command: "/side:inject summary", preserveDraft: true },
@@ -61,7 +60,7 @@ function buildHelpLines(theme: Theme, width: number): string[] {
   const rows = [
     `${theme.fg("muted", "Session ")} ${item("n", "new")}  ${item("l/u", "resume")}  ${item("t", "tree")}`,
     `${theme.fg("muted", "Pi      ")} ${item("m", "model")}  ${item("s", "settings")}  ${item("r", "reload")}`,
-    `${theme.fg("muted", "Project ")} ${item("x", "scripts")}  ${item("d", "diff")}  ${item("f", "view")}  ${item("p", "scratch")}  ${item("z", "restore")}`,
+    `${theme.fg("muted", "Project ")} ${item("d", "diff")}  ${item("f", "view")}  ${item("p", "scratch")}  ${item("z", "restore")}`,
     `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
     `${theme.fg("muted", "Side    ")} ${item("j", "summary handoff")}  ${item("J", "full handoff")}`,
     `${theme.fg("muted", "Help    ")} ${item("?", "show this window")}  ${label("Esc/Enter closes")}`,

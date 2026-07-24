@@ -18,11 +18,13 @@ A small local Pi wrapper around the official `codex review` command. Codex perfo
 
 Use `--yes` (or `-y`) to skip confirmation, primarily for non-interactive mode.
 
+When the current folder is not itself a Git worktree, an uncommitted review recursively discovers repositories below it, skips clean repositories, and reviews every repository with changes. `base` and `commit` reviews still require the current folder to be inside one repository.
+
 ## Safety behavior
 
 - Resolves the official `codex` executable from `PATH`, pins its real path for the extension runtime, and rejects a binary located inside the reviewed repository.
 - Runs `codex review` only; Codex does not edit the worktree.
-- Records HEAD, the resolved target, git status/index metadata, and hashes changed and untracked file contents.
+- Records HEAD, the resolved target, git status/index metadata, and hashes changed and untracked file contents for each reviewed repository.
 - Refuses to apply findings after repository state changes unless `--force` is explicit.
 - Treats reviewer output as untrusted evidence and tells Pi to validate every finding.
 - Never commits, pushes, merges, resets, or rewrites history.

@@ -9,6 +9,7 @@ const agentDir = join(root, "agent");
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.HERDR_ENV = "1";
 process.env.HERDR_WORKSPACE_ID = "w-test";
+process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS = "100";
 
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 const { default: orchestrator } = await import("../pi-session-orchestrator.ts");
@@ -26,6 +27,7 @@ const panes = new Map<string, Pane>();
 let registered: any;
 const eventHandlers = new Map<string, (...args: any[]) => unknown>();
 let nextRuntime = 1;
+let acceptNextInitialPrompt = true;
 const herdrCalls: string[][] = [];
 
 function output(result: unknown = {}) {
@@ -35,6 +37,59 @@ function output(result: unknown = {}) {
 function argument(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function shellArgs(command: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: "single" | "double" | undefined;
+  let started = false;
+  for (const char of command) {
+    if (quote === "single") {
+      if (char === "'") quote = undefined;
+      else current += char;
+      started = true;
+      continue;
+    }
+    if (quote === "double") {
+      if (char === '"') quote = undefined;
+      else current += char;
+      started = true;
+      continue;
+    }
+    if (char === "'") {
+      quote = "single";
+      started = true;
+    } else if (char === '"') {
+      quote = "double";
+      started = true;
+    } else if (/\s/u.test(char)) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+  if (started) args.push(current);
+  return args;
+}
+
+function initialPrompt(command: string): string | undefined {
+  const args = shellArgs(command);
+  const optionsWithValues = new Set(["--session", "--provider", "--model", "--thinking"]);
+  const positional: string[] = [];
+  for (let index = 1; index < args.length; index++) {
+    if (optionsWithValues.has(args[index])) {
+      index++;
+      continue;
+    }
+    positional.push(args[index]);
+  }
+  return positional[0]?.trim() || undefined;
 }
 
 function appendExchange(path: string, prompt: string): void {
@@ -92,6 +147,16 @@ const fakePi: any = {
         pane.agent = "pi";
         pane.agent_status = "idle";
         pane.agent_session = { kind: "path", value: match[1] };
+        const prompt = initialPrompt(text);
+        if (prompt) {
+          const accepted = acceptNextInitialPrompt;
+          acceptNextInitialPrompt = true;
+          if (accepted) {
+            pane.agent_status = "working";
+            appendExchange(match[1], prompt);
+            pane.agent_status = "idle";
+          }
+        }
       } else if (text.startsWith("/name ")) {
         SessionManager.open(pane.agent_session!.value).appendSessionInfo(text.slice(6));
       } else {
@@ -176,6 +241,42 @@ try {
   panes.delete("w-test:external");
   result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
   assert.match(result.content[0].text, /historical\/stopped/);
+
+  // A rejected startup prompt is a failed create, its tab is closed, and the
+  // durable session remains visibly incomplete until an explicit retry succeeds.
+  acceptNextInitialPrompt = false;
+  let incompleteError: Error | undefined;
+  try {
+    await execute({ action: "create", name: "Rejected startup", message: "must be accepted", cwd: root });
+  } catch (error) {
+    incompleteError = error as Error;
+  }
+  assert.ok(incompleteError);
+  assert.match(incompleteError.message, /^PI_SESSIONS_CREATE_INCOMPLETE /);
+  const incompletePayload = JSON.parse(
+    incompleteError.message.match(/^PI_SESSIONS_CREATE_INCOMPLETE (\{.*\})$/m)![1],
+  );
+  assert.equal(incompletePayload.startingMessageAccepted, false);
+  assert.equal(incompletePayload.runtimeStatus, "stopped");
+  assert.equal([...panes.values()].some((pane) => pane.agent_session?.value === incompletePayload.sessionPath), false);
+
+  result = await execute({ action: "status", id: incompletePayload.sessionId });
+  assert.match(result.content[0].text, /Status: incomplete/);
+  assert.match(result.content[0].text, /Starting message: MISSING/);
+  await assert.rejects(
+    execute({ action: "resume", id: incompletePayload.sessionId }),
+    /PI_SESSIONS_STARTING_MESSAGE_MISSING/,
+  );
+  result = await execute({
+    action: "resume",
+    id: incompletePayload.sessionId,
+    message: "-recovered prompt isn't confused with an option-like prefix",
+  });
+  assert.match(result.content[0].text, /Recovery message sent and accepted/);
+  result = await execute({ action: "read", id: incompletePayload.sessionId });
+  assert.match(result.content[0].text, /-recovered prompt isn't confused with an option-like prefix/);
+  await execute({ action: "stop", id: incompletePayload.sessionId });
+  await unlink(incompletePayload.sessionPath);
 
   result = await execute({ action: "create", name: "Lifecycle", message: "start", cwd: root }, SessionManager.open(externalPath));
   const created = result.details.session;

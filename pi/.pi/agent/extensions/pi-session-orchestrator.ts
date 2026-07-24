@@ -16,6 +16,11 @@ const LEGACY_REGISTRY_PATH = join(getAgentDir(), "pi-session-orchestrator", "reg
 const WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID;
 const SIDE_SOURCE_SESSION = process.env.PI_HERDR_SIDE_SOURCE;
 const SIDE_PARENT_PANE = process.env.PI_HERDR_SIDE_PARENT_PANE;
+const configuredPromptTimeout = Number(process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS);
+const PROMPT_ACCEPT_TIMEOUT_MS =
+  Number.isFinite(configuredPromptTimeout) && configuredPromptTimeout > 0
+    ? Math.max(100, configuredPromptTimeout)
+    : 30_000;
 
 const SessionLifecycle = StringEnum(["persistent", "task"] as const);
 const ThinkingLevel = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
@@ -44,6 +49,8 @@ type ActionName =
   | "stop"
   | "resume"
   | "rename";
+
+type SessionMetadataReader = Pick<SessionManager, "getHeader" | "getEntries">;
 
 interface OrchestratorMetadata {
   version?: number;
@@ -198,7 +205,7 @@ function isMetadata(value: unknown): value is OrchestratorMetadata {
   );
 }
 
-function metadataFor(manager: SessionManager): OrchestratorMetadata | undefined {
+function metadataFor(manager: SessionMetadataReader): OrchestratorMetadata | undefined {
   const header = manager.getHeader();
   const candidates = manager.getEntries().flatMap((entry) => {
     if (entry.type !== "custom" || entry.customType !== METADATA_TYPE || !isMetadata(entry.data)) return [];
@@ -522,13 +529,16 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     return lines.slice(-limit).join("\n\n") || "(No user/assistant messages yet.)";
   }
 
-  function launchCommand(session: ManagedSession): string {
+  function launchCommand(session: ManagedSession, initialMessage?: string): string {
     return [
       "pi",
       `--session ${shellQuote(session.sessionPath)}`,
       session.provider ? `--provider ${shellQuote(session.provider)}` : "",
       session.model ? `--model ${shellQuote(session.model)}` : "",
       session.thinking ? `--thinking ${shellQuote(session.thinking)}` : "",
+      // A leading newline prevents prompts beginning with "-" or "@" from being
+      // parsed as a Pi option or @file while leaving the effective prompt unchanged.
+      initialMessage ? shellQuote(`\n${initialMessage}`) : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -553,52 +563,86 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     throw new Error("Timed out waiting for the Pi session to become ready");
   }
 
-  function sessionContainsUserMessage(session: ManagedSession, message: string): boolean {
+  function userMessageEntryIds(session: ManagedSession): Set<string> {
+    try {
+      return new Set(
+        SessionManager.open(session.sessionPath)
+          .getEntries()
+          .filter((entry) => entry.type === "message" && entry.message.role === "user")
+          .map((entry) => entry.id),
+      );
+    } catch {
+      return new Set();
+    }
+  }
+
+  function hasAcceptedStartingMessage(session: ManagedSession): boolean {
+    if (!session.orchestrated) return true;
     try {
       return SessionManager.open(session.sessionPath)
-        .getBranch()
-        .some(
-          (entry) =>
-            entry.type === "message" &&
-            entry.message.role === "user" &&
-            textContent(entry.message.content) === message,
-        );
+        .getEntries()
+        .some((entry) => entry.type === "message" && entry.message.role === "user");
     } catch {
       return false;
     }
   }
 
+  function missingStartingMessageError(session: ManagedSession): Error {
+    return new Error(
+      `PI_SESSIONS_STARTING_MESSAGE_MISSING ${JSON.stringify({
+        sessionId: session.id,
+        sessionPath: session.sessionPath,
+        startingMessageAccepted: false,
+        retry: { action: "resume", id: session.id, message: "<starting message>" },
+      })}\nSession ${session.id} has no accepted starting message. Refusing to report an idle runtime as resumed; retry with action=resume and message, or action=send and message.`,
+    );
+  }
+
+  async function waitForNewUserMessage(
+    session: ManagedSession,
+    previousEntryIds: Set<string>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const accepted = () => [...userMessageEntryIds(session)].some((id) => !previousEntryIds.has(id));
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      if (accepted()) return true;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+    }
+    return accepted();
+  }
+
   async function waitUntilPromptAccepted(
     session: ManagedSession,
     paneId: string,
-    message: string,
+    previousEntryIds: Set<string>,
     signal?: AbortSignal,
   ): Promise<void> {
-    const waitForMessage = async (timeoutMs: number): Promise<boolean> => {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        if (signal?.aborted) throw new Error("Operation aborted");
-        if (sessionContainsUserMessage(session, message)) return true;
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
-      }
-      return false;
-    };
-    if (await waitForMessage(5_000)) return;
+    if (await waitForNewUserMessage(session, previousEntryIds, 5_000, signal)) return;
     await herdr(["pane", "send-keys", paneId, "enter"], signal);
-    if (await waitForMessage(5_000)) return;
+    if (await waitForNewUserMessage(session, previousEntryIds, 5_000, signal)) return;
     throw new Error("Pi did not accept the session prompt");
   }
 
   async function launchSession(
     session: ManagedSession,
     signal?: AbortSignal,
+    initialMessage?: string,
   ): Promise<{ session: ManagedSession; runtime: HerdrPane }> {
     if (process.env.HERDR_ENV !== "1" || !WORKSPACE_ID) {
       throw new Error("pi_sessions requires Pi to run inside Herdr");
     }
     const existing = await oneRuntime(session, signal);
-    if (existing) return { session, runtime: existing };
+    if (existing) {
+      if (initialMessage) {
+        throw new Error(`Session ${session.id} already has a runtime; refusing to discard its launch prompt`);
+      }
+      return { session, runtime: existing };
+    }
 
+    const previousUserMessageIds = initialMessage ? userMessageEntryIds(session) : undefined;
     const response = await herdr(
       [
         "tab",
@@ -618,11 +662,38 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     if (!tabId || !paneId) throw new Error("Herdr did not return a tab and pane ID");
 
     try {
-      await herdr(["pane", "run", paneId, launchCommand(session)], signal);
-      const runtime = await waitUntilReady(paneId, signal);
+      // Pi's documented interactive CLI prompt is processed only after startup and
+      // resource initialization. Use it for a newly launched session instead of
+      // racing terminal input against an editor that Herdr may label idle too early.
+      await herdr(["pane", "run", paneId, launchCommand(session, initialMessage)], signal);
+      let runtime: HerdrPane;
+      if (initialMessage) {
+        const accepted = await waitForNewUserMessage(
+          session,
+          previousUserMessageIds ?? new Set(),
+          PROMPT_ACCEPT_TIMEOUT_MS,
+          signal,
+        );
+        if (!accepted) throw new Error("Pi did not accept its CLI starting prompt before the timeout");
+        const paneResponse = await herdr(["pane", "get", paneId], signal);
+        if (!paneResponse.result?.pane) throw new Error("Herdr lost the Pi pane after accepting its starting prompt");
+        runtime = paneResponse.result.pane;
+      } else {
+        runtime = await waitUntilReady(paneId, signal);
+      }
       return { session: (await resolveSession(session.id)), runtime: { ...runtime, tab_id: runtime.tab_id ?? tabId } };
     } catch (error) {
-      await herdr(["tab", "close", tabId]).catch(() => {});
+      let cleanupError: unknown;
+      try {
+        await herdr(["tab", "close", tabId]);
+      } catch (closeError) {
+        cleanupError = closeError;
+      }
+      if (cleanupError) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; also failed to close Herdr tab ${tabId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        );
+      }
       throw error;
     }
   }
@@ -630,16 +701,19 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
   async function sendPrompt(session: ManagedSession, message: string, signal?: AbortSignal): Promise<ManagedSession> {
     assertNotSelf(session, "send to");
     const existing = await oneRuntime(session, signal);
-    if (existing && !session.orchestrated) {
+    if (!existing) {
+      await launchSession(session, signal, message);
+      return resolveSession(session.id);
+    }
+    if (!session.orchestrated) {
       throw new Error(`Refusing to send to discovered session ${session.id}: Pi cannot verify that its editor draft is empty. Focus it or use the side-chat mailbox handoff instead.`);
     }
-    const launched = existing ? { session, runtime: existing } : await launchSession(session, signal);
-    const pane = launched.runtime;
-    if (pane.agent_status === "working" || pane.agent_status === "blocked") {
-      throw new Error(`Session ${session.id} is ${pane.agent_status}; wait for it before sending another message`);
+    if (existing.agent_status === "working" || existing.agent_status === "blocked") {
+      throw new Error(`Session ${session.id} is ${existing.agent_status}; wait for it before sending another message`);
     }
-    await herdr(["pane", "run", pane.pane_id, message], signal);
-    await waitUntilPromptAccepted(launched.session, pane.pane_id, message, signal);
+    const previousUserMessageIds = userMessageEntryIds(session);
+    await herdr(["pane", "run", existing.pane_id, message], signal);
+    await waitUntilPromptAccepted(session, existing.pane_id, previousUserMessageIds, signal);
     return resolveSession(session.id);
   }
 
@@ -671,7 +745,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
 
   async function createSession(
     params: ToolParams,
-    ctx: { cwd: string; model?: { provider: string; id: string } | null; sessionManager?: SessionManager },
+    ctx: { cwd: string; model?: { provider: string; id: string } | null; sessionManager?: SessionMetadataReader },
     signal?: AbortSignal,
   ): Promise<ManagedSession> {
     const name = params.name?.trim();
@@ -718,8 +792,29 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     try {
       return await sendPrompt(session, message, signal);
     } catch (error) {
+      // A last read closes the race where the prompt was persisted just as the
+      // timeout fired. Otherwise tear down any runtime so an incomplete create
+      // cannot look launched merely because an idle Pi process survived.
+      if (hasAcceptedStartingMessage(session)) return resolveSession(id);
+      const runtimes = await runtimesFor(session).catch(() => []);
+      let cleanupError: string | undefined;
+      if (runtimes.length > 0) {
+        try {
+          await closeRuntimeTabs(runtimes);
+        } catch (closeError) {
+          cleanupError = closeError instanceof Error ? closeError.message : String(closeError);
+        }
+      }
+      const remainingRuntimes = await runtimesFor(session).catch(() => runtimes);
       throw new Error(
-        `Created ${id} at ${sessionPath}, but failed to launch or send its starting message: ${error instanceof Error ? error.message : String(error)}`,
+        `PI_SESSIONS_CREATE_INCOMPLETE ${JSON.stringify({
+          sessionId: id,
+          sessionPath,
+          startingMessageAccepted: false,
+          runtimeStatus: runtimeStatus(remainingRuntimes),
+          retry: { action: "resume", id, message: "<starting message>" },
+          ...(cleanupError ? { cleanupError } : {}),
+        })}\nCreated the session record, but the starting message was NOT accepted. The orchestrator did not report creation success. Retry with action=resume and message, or action=send and message. Cause: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -734,6 +829,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       "Use pi_sessions to discover or manage existing local Pi sessions when requested; session creation should remain exceptional.",
       "Create a subagent session only for substantial independent work or a deliberately clean-room perspective. A session already created to own an assigned task should work primarily there and delegate only clearly separable subtasks, not pass through the whole assignment. Do not delegate routine inspect-edit-test workflows, simple fixes, tightly coupled work, or merely because delegation is available—especially from an ephemeral side chat. If uncertain, work in the current session or ask the user first.",
       "When creating with pi_sessions, make the starting message self-contained because the new session does not inherit the current conversation.",
+      "If pi_sessions reports PI_SESSIONS_CREATE_INCOMPLETE or PI_SESSIONS_STARTING_MESSAGE_MISSING, creation did not succeed; retry with resume or send and an explicit message instead of treating the idle session as launched.",
       "Use lifecycle=task for sessions acting as internal subagents; use persistent only when the user wants to keep or revisit the session tab.",
       "Treat a created pi_sessions worker as blocking when its result is needed for the current request: watch it to completion, inspect and validate its result, and continue dependent work in the same turn. Leave it running only when the user explicitly asks for background work; after a watch timeout, inspect status and output before responding.",
     ],
@@ -741,7 +837,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       action: Action,
       id: Type.Optional(Type.String({ description: "Session ID/prefix, path, pane ID, exact/fuzzy name, cwd fragment, or current/self alias" })),
       name: Type.Optional(Type.String({ description: "Session name for create or rename" })),
-      message: Type.Optional(Type.String({ description: "Starting message for create or follow-up for send" })),
+      message: Type.Optional(Type.String({ description: "Starting message for create, follow-up for send, or recovery message for resume" })),
       cwd: Type.Optional(Type.String({ description: "Working directory for create, or cwd substring filter for list" })),
       createdAfter: Type.Optional(Type.String({ description: "List sessions created after ISO date/time or relative duration (for example 3d)" })),
       updatedAfter: Type.Optional(Type.String({ description: "List sessions updated after ISO date/time or relative duration (for example 2w)" })),
@@ -763,8 +859,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
             void monitorTaskCompletion(session.id).catch(() => {});
           }
           return toolResult(
-            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent.`,
-            { session, runtime },
+            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent and accepted.`,
+            { session, runtime, startingMessageAccepted: true },
           );
         }
         case "list": {
@@ -782,28 +878,33 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const details = [];
           for (const session of sessions) {
             const runtimes = await runtimesFor(session, signal, runtimeIndex);
-            const status = runtimeStatus(runtimes);
+            const startingMessageAccepted = hasAcceptedStartingMessage(session);
+            const status = startingMessageAccepted ? runtimeStatus(runtimes) : "incomplete";
             const origin = effectiveOrigin(session, runtimes);
-            rows.push(`${session.id}  ${origin.padEnd(10)}  ${status.padEnd(8)}  ${session.name}  (${formatAge(session.updatedAt)} ago)`);
-            details.push({ ...session, origin, status, runtimes });
+            rows.push(`${session.id}  ${origin.padEnd(10)}  ${status.padEnd(10)}  ${session.name}  (${formatAge(session.updatedAt)} ago)`);
+            details.push({ ...session, origin, status, runtimes, startingMessageAccepted });
           }
           return toolResult(rows.join("\n"), { sessions: details });
         }
         case "status": {
           const session = await resolveSession(params.id);
           const runtimes = await runtimesFor(session, signal);
-          const status = runtimeStatus(runtimes);
+          const startingMessageAccepted = hasAcceptedStartingMessage(session);
+          const runtime = runtimeStatus(runtimes);
+          const status = startingMessageAccepted ? runtime : "incomplete";
           const latest = latestMessage(session, "assistant");
           return toolResult(
             [
               `${session.id} (${session.name})`,
               `Origin: ${effectiveOrigin(session, runtimes)}`,
               `Status: ${status}`,
+              `Starting message: ${startingMessageAccepted ? "accepted" : "MISSING — retry required"}`,
+              `Runtime: ${runtime}`,
               `Session: ${session.sessionPath}`,
               runtimes.length ? `Herdr pane: ${runtimes.map((pane) => pane.pane_id).join(", ")}` : "Herdr pane: stopped",
               latest ? `Latest assistant: ${latest.text}` : "Latest assistant: (none)",
             ].join("\n"),
-            { session, status, runtimes, latest },
+            { session, status, runtime, runtimes, latest, startingMessageAccepted },
           );
         }
         case "read": {
@@ -816,7 +917,10 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           if (!message) throw new Error("send requires message");
           const session = await resolveSession(params.id);
           const updated = await sendPrompt(session, message, signal);
-          return toolResult(`Sent follow-up to ${updated.id} (${updated.name}).`, { session: updated });
+          return toolResult(`Sent follow-up to ${updated.id} (${updated.name}).`, {
+            session: updated,
+            messageAccepted: true,
+          });
         }
         case "watch": {
           const session = await resolveSession(params.id);
@@ -826,6 +930,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           while (Date.now() < deadline) {
             if (signal?.aborted) throw new Error("Watch aborted");
             const current = await resolveSession(session.id);
+            if (!hasAcceptedStartingMessage(current)) throw missingStartingMessageError(current);
             const runtimes = await runtimesFor(current, signal);
             const status = runtimeStatus(runtimes);
             const latest = latestMessage(current, "assistant");
@@ -890,10 +995,21 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
         }
         case "resume": {
           const session = await resolveSession(params.id);
+          const recoveryMessage = params.message?.trim();
+          if (recoveryMessage) {
+            const current = await sendPrompt(session, recoveryMessage, signal);
+            const runtime = await oneRuntime(current, signal);
+            return toolResult(
+              `Running ${current.id} (${current.name}) in Herdr tab ${runtime?.tab_id ?? "running"}.\nRecovery message sent and accepted.`,
+              { session: current, runtime, startingMessageAccepted: true, recovered: true },
+            );
+          }
+          if (!hasAcceptedStartingMessage(session)) throw missingStartingMessageError(session);
           const { session: current, runtime } = await launchSession(session, signal);
           return toolResult(`Running ${current.id} (${current.name}) in Herdr tab ${runtime.tab_id}.`, {
             session: current,
             runtime,
+            startingMessageAccepted: true,
           });
         }
         case "rename": {

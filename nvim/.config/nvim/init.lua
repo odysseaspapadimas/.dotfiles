@@ -1,4 +1,4 @@
--- Minimal, deterministic read-only viewer configuration.
+-- Global Neovim configuration shared with Pi's file viewer.
 vim.opt.number = true
 vim.opt.relativenumber = true
 vim.opt.cursorline = true
@@ -11,6 +11,9 @@ vim.opt.backup = false
 vim.opt.writebackup = false
 vim.opt.undofile = false
 vim.opt.mouse = "a"
+vim.opt.clipboard = "unnamedplus"
+vim.opt.ignorecase = true
+vim.opt.smartcase = true
 vim.opt.scrolloff = 4
 vim.opt.sidescrolloff = 4
 vim.opt.foldenable = false
@@ -24,7 +27,10 @@ vim.opt.runtimepath:prepend(plugin_root .. "/mini.nvim")
 require("mini.icons").setup()
 MiniIcons.mock_nvim_web_devicons()
 require("neo-tree").setup({
-  filesystem = { follow_current_file = { enabled = true } },
+  filesystem = {
+    follow_current_file = { enabled = true },
+    filtered_items = { visible = true },
+  },
   window = { width = 36 },
 })
 

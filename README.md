@@ -8,12 +8,13 @@ Personal configuration managed with [GNU Stow](https://www.gnu.org/software/stow
 sudo apt-get install stow
 git clone <your-repository-url> ~/dotfiles
 cd ~/dotfiles
-stow -t ~ pi herdr hunk portd
+stow -t ~ pi herdr hunk portd nvim
 ```
 
 ## Packages
 
 - `pi` — Pi settings, keybindings, themes, and locally maintained extensions.
+- `nvim` — global Neovim configuration shared with Pi's file viewer.
 - `herdr` — Herdr keybindings, UI preferences, notifications, and custom commands.
 - `hunk` — Hunk custom Catppuccin Mocha review theme.
 - `portd` — automatic SSH development-port forwarding source and Herdr plugin.
@@ -25,7 +26,7 @@ Sensitive and generated Pi state is intentionally excluded, including OAuth cred
 
 ```bash
 cd ~/dotfiles
-stow -R -t ~ pi herdr hunk portd
+stow -R -t ~ pi herdr hunk portd nvim
 
 # On the Mac:
 stow -R -t ~ macos
