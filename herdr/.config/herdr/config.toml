@@ -59,7 +59,7 @@ switch_ascii_input_source_in_prefix = false
 [[keys.command]]
 key = "prefix+o"
 type = "popup"
-command = "ports"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" ports"
 width = "82%"
 height = "82%"
 description = "development ports"
@@ -67,10 +67,18 @@ description = "development ports"
 [[keys.command]]
 key = "prefix+a"
 type = "popup"
-command = "project-scripts"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" project-scripts"
 width = "82%"
 height = "82%"
 description = "project scripts"
+
+[[keys.command]]
+key = "prefix+d"
+type = "popup"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" drop"
+width = "90%"
+height = "90%"
+description = "upload files"
 
 [[keys.command]]
 key = "prefix+comma"

@@ -1,0 +1,61 @@
+#!/bin/sh
+# Restore the user command environment that Herdr popup terminals do not inherit.
+
+set -u
+
+find_herdr_session() {
+    pid=$PPID
+    while [ "$pid" -gt 1 ] 2>/dev/null; do
+        cmdline="/proc/$pid/cmdline"
+        status="/proc/$pid/status"
+        [ -r "$cmdline" ] && [ -r "$status" ] || return 1
+
+        executable=$(tr '\000' '\n' <"$cmdline" | sed -n '1p')
+        case ${executable##*/} in
+            herdr)
+                session=$(tr '\000' '\n' <"$cmdline" | awk 'previous == "--session" { print; exit } { previous = $0 }')
+                if [ -n "$session" ]; then
+                    printf '%s\n' "$session"
+                    return 0
+                fi
+                ;;
+        esac
+
+        pid=$(awk '/^PPid:/ { print $2; exit }' "$status")
+        [ -n "$pid" ] || return 1
+    done
+    return 1
+}
+
+if [ "$#" -eq 0 ]; then
+    printf '%s\n' 'usage: popup-env COMMAND [ARG ...]' >&2
+    exit 2
+fi
+
+home=${HOME:-}
+if [ -n "$home" ]; then
+    case :${PATH:-}: in
+        *:"$home/.local/bin":*) ;;
+        *) PATH="$home/.local/bin${PATH:+:$PATH}" ;;
+    esac
+    export PATH
+fi
+
+if [ -z "${HERDR_SESSION:-}" ]; then
+    HERDR_SESSION=$(find_herdr_session || true)
+    [ -n "$HERDR_SESSION" ] && export HERDR_SESSION
+fi
+
+if [ -n "${HERDR_SESSION:-}" ] && [ -z "${HERDR_SOCKET_PATH:-}" ] && [ -n "$home" ]; then
+    HERDR_SOCKET_PATH="$home/.config/herdr/sessions/$HERDR_SESSION/herdr.sock"
+    export HERDR_SOCKET_PATH
+fi
+
+"$@"
+status=$?
+if [ "$status" -ne 0 ] && [ -t 0 ]; then
+    printf '\nPopup command exited with status %s.\n' "$status" >&2
+    printf 'Press Enter to close…' >&2
+    IFS= read -r _ || true
+fi
+exit "$status"

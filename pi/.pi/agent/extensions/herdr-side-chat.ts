@@ -8,7 +8,7 @@ import {
 import { watch, type FSWatcher } from "node:fs";
 import { lstat, mkdir, readFile, readdir, readlink, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const SIDE_MODE = process.env.PI_HERDR_SIDE === "1";
@@ -434,8 +434,18 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         saved.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
       }
     }
-    saved.appendSessionInfo("Saved side chat");
-    return saved.getSessionFile() ?? "saved session";
+    const sideTitle = ctx.sessionManager.getSessionName()?.trim() || "Untitled";
+    saved.appendSessionInfo(`${sideTitle} — side`);
+    const temporaryPath = saved.getSessionFile();
+    if (!temporaryPath) return "saved session";
+
+    // Side chats use an isolated PI_CODING_AGENT_DIR so their ephemeral sessions
+    // stay out of Pi's normal resume picker. A conversation explicitly saved by
+    // the user is different: promote it beside the source session so ordinary Pi
+    // instances can discover and resume it.
+    const sharedPath = join(dirname(SOURCE_SESSION), basename(temporaryPath));
+    if (temporaryPath !== sharedPath) await rename(temporaryPath, sharedPath);
+    return sharedPath;
   }
 
   async function herdr(args: string[]): Promise<HerdrResponse> {

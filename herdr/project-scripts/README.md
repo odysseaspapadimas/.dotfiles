@@ -9,14 +9,15 @@ Standalone Ratatui package and Composer script runner for Herdr. It replaces the
 - Shows running services first and reconnects to existing `Project services` panes.
 - Creates and reuses one services tab per resolved workspace root.
 - Starts, focuses, restarts, and stops services without requiring Pi.
+- Keeps the popup open after starting or restarting so several services can be launched quickly.
 
 ## Keys
 
 - `j`/`k` or arrows: move
 - `s`: search; `Esc` leaves search mode
 - `o`: toggle running-first ordering
-- `Enter`: start or focus
-- `f`: focus
+- `Enter`: start without closing the popup; if already running, leave it untouched
+- `f`: focus a running service pane and close the popup
 - `r`: restart
 - `x`: stop
 - `q`/`Esc`: close

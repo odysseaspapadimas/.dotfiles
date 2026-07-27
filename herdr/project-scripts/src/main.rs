@@ -81,6 +81,9 @@ fn herdr(args: &[&str]) -> Result<Value> {
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Null);
+    }
     serde_json::from_slice(&output.stdout).context("parse herdr response")
 }
 fn result_array<T: for<'de> Deserialize<'de>>(value: &Value, name: &str) -> Result<Vec<T>> {
@@ -568,14 +571,31 @@ impl App {
         }
         Ok(())
     }
-    fn run_selected(&mut self, restart: bool) -> Result<bool> {
+    fn focus_selected(&mut self) -> Result<bool> {
         let Some(i) = self.selected() else {
             return Ok(false);
         };
+        let Some(pane) = self.entries[i]
+            .pane
+            .clone()
+            .filter(|_| self.entries[i].running)
+        else {
+            self.message = format!("{} is not running", self.entries[i].script.name);
+            return Ok(false);
+        };
+        self.focus(&pane)?;
+        Ok(true)
+    }
+    fn run_selected(&mut self, restart: bool) -> Result<()> {
+        let Some(i) = self.selected() else {
+            return Ok(());
+        };
         if self.entries[i].running && !restart {
-            let pane = self.entries[i].pane.clone().unwrap();
-            self.focus(&pane)?;
-            return Ok(true);
+            self.message = format!(
+                "{} is already running · f focus · r restart",
+                self.entries[i].script.name
+            );
+            return Ok(());
         }
         let pane = self.target(i)?;
         if process_count(&pane.pane_id)? > 0 {
@@ -596,8 +616,14 @@ impl App {
             &pane.pane_id,
             &self.entries[i].script.command,
         ])?;
-        self.focus(&pane)?;
-        Ok(true)
+        self.message = format!(
+            "{} {}",
+            if restart { "restarted" } else { "started" },
+            self.entries[i].script.name
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        self.refresh()?;
+        Ok(())
     }
     fn stop(&mut self) -> Result<()> {
         let Some(i) = self.selected() else {
@@ -626,11 +652,7 @@ impl App {
             if self.searching {
                 match key.code {
                     KeyCode::Esc => self.searching = false,
-                    KeyCode::Enter => {
-                        if self.run_selected(false)? {
-                            return Ok(());
-                        }
-                    }
+                    KeyCode::Enter => self.run_selected(false)?,
                     KeyCode::Up => self.move_by(-1),
                     KeyCode::Down => self.move_by(1),
                     KeyCode::Backspace => {
@@ -653,16 +675,13 @@ impl App {
                         self.running_first = !self.running_first;
                         self.table.select(Some(0));
                     }
-                    KeyCode::Enter | KeyCode::Char('f') => {
-                        if self.run_selected(false)? {
+                    KeyCode::Enter => self.run_selected(false)?,
+                    KeyCode::Char('f') => {
+                        if self.focus_selected()? {
                             return Ok(());
                         }
                     }
-                    KeyCode::Char('r') => {
-                        if self.run_selected(true)? {
-                            return Ok(());
-                        }
-                    }
+                    KeyCode::Char('r') => self.run_selected(true)?,
                     KeyCode::Char('x') => {
                         if let Err(e) = self.stop() {
                             self.message = e.to_string()
@@ -763,9 +782,9 @@ impl App {
             areas[2],
         );
         let help = if self.searching {
-            "type to filter  ↑/↓ move  Enter run/focus  Esc browse"
+            "type to filter  ↑/↓ move  Enter start  Esc browse"
         } else {
-            "j/k move  s search  o order  Enter start/focus  f focus  r restart  x stop  q quit"
+            "j/k move  s search  o order  Enter start  f focus  r restart  x stop  q quit"
         };
         frame.render_widget(
             Paragraph::new(format!("{help}    {}", self.message)),
