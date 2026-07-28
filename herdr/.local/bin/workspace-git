@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Choose a Git repository from a workspace and open it in LazyGit."""
+
+from __future__ import annotations
+
+import argparse
+import curses
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+MAX_CHILDREN = 1_000
+MAX_REPOSITORIES = 32
+
+
+class WorkspaceGitError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Repository:
+    root: Path
+    branch: str
+    staged: int
+    modified: int
+    untracked: int
+    conflicted: int
+    additions: int
+    deletions: int
+
+    @property
+    def dirty(self) -> int:
+        return self.staged + self.modified + self.untracked + self.conflicted
+
+
+def run(args: list[str], *, timeout: float = 5) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise WorkspaceGitError(f"could not run {args[0]}: {error}") from error
+
+
+def git_root(start: Path) -> Path | None:
+    result = run(["git", "-C", str(start), "rev-parse", "--show-toplevel"])
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def valid_child_repository(child: Path) -> bool:
+    marker = child / ".git"
+    if child.is_symlink() or not marker.exists() or marker.is_symlink():
+        return False
+    root = git_root(child)
+    if root != child.resolve():
+        return False
+    superproject = run(["git", "-C", str(child), "rev-parse", "--show-superproject-working-tree"])
+    return superproject.returncode == 0 and not superproject.stdout.strip()
+
+
+def discover(start: Path) -> tuple[Path, list[Path]]:
+    start = start.resolve()
+    if start.is_file():
+        start = start.parent
+    direct = git_root(start)
+    if direct is not None:
+        return direct, [direct]
+    if start == Path.home().resolve():
+        raise WorkspaceGitError("refusing to scan the home directory for repositories")
+
+    try:
+        children = list(start.iterdir())
+    except OSError as error:
+        raise WorkspaceGitError(f"could not inspect workspace: {error}") from error
+    if len(children) > MAX_CHILDREN:
+        raise WorkspaceGitError(f"workspace has more than {MAX_CHILDREN} immediate children")
+
+    repositories = [child.resolve() for child in children if child.is_dir() and valid_child_repository(child)]
+    repositories.sort(key=lambda path: path.name.casefold())
+    if len(repositories) > MAX_REPOSITORIES:
+        raise WorkspaceGitError(f"workspace has more than {MAX_REPOSITORIES} repositories")
+    if not repositories:
+        raise WorkspaceGitError("no immediate-child Git repositories found")
+    return start, repositories
+
+
+def diff_line_counts(root: Path) -> tuple[int, int]:
+    result = run(["git", "-C", str(root), "diff", "--numstat", "HEAD", "--"], timeout=8)
+    outputs = [result.stdout] if result.returncode == 0 else []
+    if result.returncode != 0:
+        outputs = []
+        for args in (["diff", "--numstat", "--"], ["diff", "--cached", "--numstat", "--"]):
+            fallback = run(["git", "-C", str(root), *args], timeout=8)
+            if fallback.returncode == 0:
+                outputs.append(fallback.stdout)
+
+    additions = deletions = 0
+    for output in outputs:
+        for line in output.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) < 3:
+                continue
+            if fields[0].isdigit():
+                additions += int(fields[0])
+            if fields[1].isdigit():
+                deletions += int(fields[1])
+    return additions, deletions
+
+
+def repository_status(root: Path) -> Repository:
+    branch_result = run(["git", "-C", str(root), "branch", "--show-current"])
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    if not branch:
+        revision = run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"])
+        branch = f"@{revision.stdout.strip()}" if revision.returncode == 0 else "unborn"
+
+    status = run(["git", "-C", str(root), "status", "--porcelain=v1", "-z"], timeout=8)
+    if status.returncode != 0:
+        raise WorkspaceGitError(status.stderr.strip() or f"could not read status for {root.name}")
+
+    staged = modified = untracked = conflicted = 0
+    conflict_codes = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+    skip_rename_source = False
+    for record in status.stdout.split("\0"):
+        if skip_rename_source:
+            skip_rename_source = False
+            continue
+        if len(record) < 3:
+            continue
+        code = record[:2]
+        if "R" in code or "C" in code:
+            skip_rename_source = True
+        if code == "??":
+            untracked += 1
+        elif code in conflict_codes:
+            conflicted += 1
+        else:
+            if code[0] not in {" ", "?"}:
+                staged += 1
+            if code[1] not in {" ", "?"}:
+                modified += 1
+    additions, deletions = diff_line_counts(root)
+    return Repository(root, branch, staged, modified, untracked, conflicted, additions, deletions)
+
+
+def status_text(repository: Repository) -> str:
+    parts = []
+    if repository.staged:
+        parts.append(f"{repository.staged} staged")
+    if repository.modified:
+        parts.append(f"{repository.modified} modified")
+    if repository.untracked:
+        parts.append(f"{repository.untracked} untracked")
+    if repository.conflicted:
+        parts.append(f"{repository.conflicted} conflicted")
+    return ", ".join(parts) if parts else "clean"
+
+
+def choose(stdscr: curses.window, workspace: Path, repositories: list[Repository]) -> Repository | None:
+    curses.curs_set(0)
+    curses.use_default_colors()
+    if curses.has_colors():
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_RED, -1)
+    selected = 0
+
+    while True:
+        height, width = stdscr.getmaxyx()
+        stdscr.erase()
+        title = f" Git repositories · {workspace.name or workspace} "
+        stdscr.addnstr(0, 0, title, max(0, width - 1), curses.color_pair(1) | curses.A_BOLD)
+        if height < 5 or width < 30:
+            stdscr.addnstr(2, 0, "Popup is too small", max(0, width - 1))
+        else:
+            visible_height = height - 3
+            start = min(max(0, selected - visible_height + 1), max(0, len(repositories) - visible_height))
+            for row, repository in enumerate(repositories[start : start + visible_height], start=1):
+                index = start + row - 1
+                marker = "›" if index == selected else " "
+                state = "●" if repository.dirty else "○"
+                detail = status_text(repository)
+                selected_attr = curses.A_REVERSE if index == selected else curses.A_NORMAL
+                if repository.conflicted:
+                    base_color = curses.color_pair(4)
+                elif repository.dirty:
+                    base_color = curses.color_pair(3)
+                else:
+                    base_color = curses.color_pair(2)
+                prefix = f"{marker} {state} {repository.root.name:<24} {repository.branch:<18} "
+                columns = [
+                    (prefix, selected_attr | base_color),
+                    (f"+{repository.additions:<6}", selected_attr | curses.color_pair(2) | curses.A_BOLD),
+                    (f"-{repository.deletions:<6}", selected_attr | curses.color_pair(4) | curses.A_BOLD),
+                    (detail, selected_attr | base_color),
+                ]
+                column = 0
+                for text, attribute in columns:
+                    if column >= width - 1:
+                        break
+                    clipped = text[: max(0, width - 1 - column)]
+                    stdscr.addstr(row, column, clipped, attribute)
+                    column += len(clipped)
+            help_text = "j/k or arrows move · Enter open LazyGit · r refresh · q close"
+            stdscr.addnstr(height - 1, 0, help_text, max(0, width - 1), curses.A_DIM)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (ord("q"), 27):
+            return None
+        if key in (ord("j"), curses.KEY_DOWN):
+            selected = (selected + 1) % len(repositories)
+        elif key in (ord("k"), curses.KEY_UP):
+            selected = (selected - 1) % len(repositories)
+        elif key in (10, 13, curses.KEY_ENTER):
+            return repositories[selected]
+        elif key == ord("r"):
+            repositories[:] = [repository_status(item.root) for item in repositories]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="choose a workspace repository and open LazyGit")
+    parser.add_argument("path", nargs="?", help="workspace, repository, or file path")
+    parser.add_argument("--list", action="store_true", help="print discovered repository status as JSON")
+    args = parser.parse_args(argv)
+
+    if shutil.which("git") is None:
+        raise WorkspaceGitError("git is not available on PATH")
+    if not args.list and shutil.which("lazygit") is None:
+        raise WorkspaceGitError("lazygit is not available on PATH")
+
+    start = Path(args.path).expanduser() if args.path else Path.cwd()
+    workspace, roots = discover(start)
+    repositories = [repository_status(root) for root in roots]
+
+    if args.list:
+        print(json.dumps([
+            {
+                "root": str(item.root),
+                "branch": item.branch,
+                "staged": item.staged,
+                "modified": item.modified,
+                "untracked": item.untracked,
+                "conflicted": item.conflicted,
+                "additions": item.additions,
+                "deletions": item.deletions,
+            }
+            for item in repositories
+        ], indent=2))
+        return 0
+
+    selected = repositories[0] if len(repositories) == 1 else curses.wrapper(choose, workspace, repositories)
+    if selected is None:
+        return 0
+    os.execvp("lazygit", ["lazygit", "--path", str(selected.root)])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except WorkspaceGitError as error:
+        print(f"workspace-git: {error}", file=sys.stderr)
+        raise SystemExit(1)

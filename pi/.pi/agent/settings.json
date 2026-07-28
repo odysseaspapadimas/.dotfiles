@@ -2,7 +2,7 @@
   "lastChangelogVersion": "0.82.1",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "low",
   "hideThinkingBlock": false,
   "theme": "catppuccin-mocha",
   "packages": [
@@ -14,7 +14,8 @@
     },
     "npm:pi-web-access",
     "npm:pi-context-usage",
-    "npm:@juicesharp/rpiv-todo"
+    "npm:@juicesharp/rpiv-todo",
+    "npm:@ogulcancelik/pi-codex-compaction"
   ],
   "quietStartup": false,
   "steeringMode": "one-at-a-time",

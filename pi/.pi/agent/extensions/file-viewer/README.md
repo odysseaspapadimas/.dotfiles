@@ -1,28 +1,18 @@
-# File viewer
+# File viewer bridge
 
-Project file viewing and editing for Pi.
+Pi bridge to the standalone Herdr workspace editor.
 
 ## Usage
 
-- `/view` — open/reuse the Herdr Neovim split with a centered `mini.pick` Git file finder active.
-- `/view path/to/file` — open a file in the reusable split.
+- `/view` — open or reuse the project editor's dedicated Herdr tab. A restarted editor restores its workspace session; a new workspace starts with Neo-tree open.
+- `/view path/to/file` — open a project file in the dedicated editor tab.
 - `/view path/to/file:120` — open at line 120.
-- `/view --tab path/to/file:120` — open in the reusable dedicated tab.
-- `Ctrl+X f` — open the Neovim pane directly with `mini.pick` active while preserving the prompt draft.
+- `/view --split path/to/file:120` — open in a reusable split beside Pi instead.
+- `/view --tab ...` — explicit alias for the default dedicated-tab behavior.
+- `Ctrl+X f` — invoke `/view` while preserving the prompt draft.
 
-Inside Herdr, files open in editable Neovim with bundled Catppuccin Mocha styling, `mini.icons`, and Neo-tree. The extension installs pinned `mini.nvim`, `neo-tree.nvim`, `plenary.nvim`, and `nui.nvim` checkouts under `~/.local/share/pi-file-viewer/` on first use. Hybrid line numbers are enabled: the current line shows its absolute number while surrounding lines show their relative distance.
+Inside Herdr, this extension delegates to `~/.local/bin/workspace-editor`. Pi no longer installs Neovim plugins or owns the editor pane, process, or RPC socket. Editor instances are scoped by canonical project root and Herdr workspace, so the same editor can be reused from any Pi pane in that workspace.
 
-Viewer keybindings:
-
-- `Space` — leader
-- `Space e` — toggle Neo-tree
-- `Ctrl+P` — find files
-- `Space f g` — live grep
-- `Space f b` — buffers
-- `Space b d` — close buffer
-- `[b` / `]b` — previous/next buffer
-- `Alt+J` / `Alt+K` — move the current line or visual selection The extension reuses one split and one dedicated tab per Pi pane and updates a running Neovim instance through its RPC socket.
-
-Outside Herdr, the same command uses a read-only Pi overlay with line numbers and `j/k`, arrows, Page Up/Down, `g/G`, and `q`/Esc navigation. The overlay is limited to 2 MiB.
+Outside Herdr, explicit paths still use a read-only Pi overlay with line numbers and `j/k`, arrows, Page Up/Down, `g/G`, and `q`/Esc navigation. The overlay is limited to 2 MiB. The file picker is only available through Herdr.
 
 Explicit paths are resolved against the Git root (or cwd outside Git), must remain inside it, and symlinks resolving outside the root are rejected.

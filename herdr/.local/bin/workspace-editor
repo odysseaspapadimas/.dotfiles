@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""Open or reuse a project-scoped Neovim instance inside Herdr."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+
+class EditorError(RuntimeError):
+    pass
+
+
+def command(args: list[str], *, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EditorError(f"could not run {args[0]}: {error}") from error
+
+
+def herdr(*args: str) -> dict[str, Any]:
+    result = command(["herdr", *args])
+    if result.returncode != 0:
+        raise EditorError(result.stderr.strip() or f"herdr {' '.join(args)} failed")
+    try:
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError as error:
+        raise EditorError(f"invalid Herdr response: {error}") from error
+
+
+def result_items(payload: dict[str, Any], name: str) -> list[dict[str, Any]]:
+    items = payload.get("result", {}).get(name, [])
+    return items if isinstance(items, list) else []
+
+
+def parse_location(value: str) -> tuple[Path, int | None]:
+    path_text, separator, line_text = value.rpartition(":")
+    if separator and path_text and line_text.isdigit():
+        return Path(path_text), max(1, int(line_text))
+    return Path(value), None
+
+
+def project_root(start: Path) -> Path:
+    start = start.resolve()
+    result = command(["git", "-C", str(start), "rev-parse", "--show-toplevel"], timeout=5)
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip()).resolve()
+    return start
+
+
+def resolve_target(root: Path, cwd: Path, raw: str | None) -> tuple[Path | None, int | None]:
+    if raw is None:
+        return None, None
+    selected, line = parse_location(raw)
+    selected = (selected if selected.is_absolute() else cwd / selected).resolve()
+    try:
+        selected.relative_to(root)
+    except ValueError as error:
+        raise EditorError("file must be inside the project root") from error
+    if not selected.is_file():
+        raise EditorError(f"not a regular file: {selected}")
+    return selected, line
+
+
+def short_hash(*parts: str, length: int = 10) -> str:
+    digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()
+    return digest[:length]
+
+
+def focused_workspace() -> dict[str, Any]:
+    workspaces = result_items(herdr("workspace", "list"), "workspaces")
+    requested = os.environ.get("HERDR_WORKSPACE_ID")
+    if requested:
+        match = next((item for item in workspaces if item.get("workspace_id") == requested), None)
+        if match:
+            return match
+    focused = [item for item in workspaces if item.get("focused")]
+    if len(focused) == 1:
+        return focused[0]
+    raise EditorError("could not determine the invoking Herdr workspace")
+
+
+def source_pane(workspace_id: str, cwd: Path) -> dict[str, Any]:
+    panes = result_items(herdr("pane", "list", "--workspace", workspace_id), "panes")
+    requested = os.environ.get("HERDR_PANE_ID")
+    if requested:
+        match = next((item for item in panes if item.get("pane_id") == requested), None)
+        if match:
+            return match
+    focused = [item for item in panes if item.get("focused")]
+    if len(focused) == 1:
+        return focused[0]
+
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for pane in panes:
+        pane_cwd = pane.get("foreground_cwd") or pane.get("cwd")
+        if not pane_cwd:
+            continue
+        try:
+            resolved = Path(pane_cwd).resolve()
+            common = Path(os.path.commonpath([str(cwd), str(resolved)]))
+            ranked.append((len(common.parts), pane))
+        except (OSError, ValueError):
+            continue
+    if ranked:
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if len(ranked) == 1 or ranked[0][0] > ranked[1][0]:
+            return ranked[0][1]
+    raise EditorError("could not determine the invoking Herdr pane")
+
+
+def socket_path(workspace_id: str, root: Path, mode: str, source_tab: str | None) -> Path:
+    session = os.environ.get("HERDR_SESSION") or os.environ.get("HERDR_SOCKET_PATH") or "default"
+    identity = short_hash(session, workspace_id, str(root), mode, source_tab or "")
+    base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / f"herdr-editor-{os.getuid()}"
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        base.chmod(0o700)
+    except OSError:
+        pass
+    return base / f"{identity}.sock"
+
+
+def server_available(socket: Path) -> bool:
+    if not socket.exists():
+        return False
+    result = command(["nvim", "--server", str(socket), "--remote-expr", "1"], timeout=2)
+    return result.returncode == 0
+
+
+def active_foreground_processes(process_info: dict[str, Any]) -> list[dict[str, Any]]:
+    shell_pid = process_info.get("shell_pid")
+    shell_names = {"bash", "dash", "fish", "nu", "pwsh", "sh", "zsh"}
+    return [
+        item
+        for item in process_info.get("foreground_processes", [])
+        if not (
+            item.get("pid") == shell_pid
+            and Path(str(item.get("name") or "")).name in shell_names
+        )
+    ]
+
+
+def remote_open(socket: Path, target: Path | None, line: int | None) -> None:
+    if not target:
+        return
+    args = ["nvim", "--server", str(socket), "--remote-silent"]
+    if line:
+        args.append(f"+{line}")
+    args.append(str(target))
+    result = command(args, timeout=5)
+    if result.returncode != 0:
+        raise EditorError(result.stderr.strip() or "could not contact Neovim")
+
+
+def preferred_direction(source: dict[str, Any]) -> str:
+    layout = herdr("pane", "layout", "--pane", str(source["pane_id"]))
+    panes = layout.get("result", {}).get("layout", {}).get("panes", [])
+    current = next((item for item in panes if item.get("pane_id") == source.get("pane_id")), None)
+    if not current:
+        return "right"
+    rect = current.get("rect", {})
+    return "right" if rect.get("width", 0) >= rect.get("height", 0) * 2 else "down"
+
+
+def focus_pane(tab_id: str, pane_id: str) -> None:
+    herdr("tab", "focus", tab_id)
+    for _ in range(12):
+        payload = herdr("pane", "layout", "--pane", pane_id)
+        layout = payload.get("result", {}).get("layout", {})
+        current_id = layout.get("focused_pane_id")
+        if not current_id or current_id == pane_id:
+            return
+        panes = layout.get("panes", [])
+        current = next((item for item in panes if item.get("pane_id") == current_id), None)
+        target = next((item for item in panes if item.get("pane_id") == pane_id), None)
+        if not current or not target:
+            return
+        source_rect, target_rect = current["rect"], target["rect"]
+        sx = source_rect["x"] + source_rect["width"] / 2
+        sy = source_rect["y"] + source_rect["height"] / 2
+        tx = target_rect["x"] + target_rect["width"] / 2
+        ty = target_rect["y"] + target_rect["height"] / 2
+        if abs(tx - sx) >= abs(ty - sy):
+            direction = "right" if tx >= sx else "left"
+        else:
+            direction = "down" if ty >= sy else "up"
+        herdr("pane", "focus", "--direction", direction, "--pane", str(current_id))
+    raise EditorError("could not focus the editor pane")
+
+
+def find_or_create_tab(workspace_id: str, root: Path, label: str) -> tuple[str, str]:
+    tabs = result_items(herdr("tab", "list", "--workspace", workspace_id), "tabs")
+    tab = next((item for item in tabs if item.get("label") == label), None)
+    if tab:
+        panes = result_items(herdr("pane", "list", "--workspace", workspace_id), "panes")
+        pane_label = f"{label} · pane"
+        pane = next(
+            (item for item in panes if item.get("tab_id") == tab.get("tab_id") and item.get("label") == pane_label),
+            None,
+        ) or next((item for item in panes if item.get("tab_id") == tab.get("tab_id")), None)
+        if pane:
+            return str(tab["tab_id"]), str(pane["pane_id"])
+    created = herdr(
+        "tab", "create", "--workspace", workspace_id, "--cwd", str(root),
+        "--label", label, "--focus",
+    ).get("result", {})
+    tab = created.get("tab")
+    pane = created.get("pane") or created.get("root_pane")
+    if not tab or not pane:
+        raise EditorError("Herdr did not return the new editor tab and pane")
+    herdr("pane", "rename", str(pane["pane_id"]), f"{label} · pane")
+    return str(tab["tab_id"]), str(pane["pane_id"])
+
+
+def find_or_create_split(
+    workspace_id: str, source: dict[str, Any], root: Path, label: str
+) -> tuple[str, str]:
+    panes = result_items(herdr("pane", "list", "--workspace", workspace_id), "panes")
+    pane = next(
+        (item for item in panes if item.get("tab_id") == source.get("tab_id") and item.get("label") == label),
+        None,
+    )
+    if pane:
+        return str(pane["tab_id"]), str(pane["pane_id"])
+    created = herdr(
+        "pane", "split", str(source["pane_id"]), "--direction", preferred_direction(source),
+        "--cwd", str(root), "--focus",
+    ).get("result", {}).get("pane")
+    if not created:
+        raise EditorError("Herdr did not return the new editor split")
+    herdr("pane", "rename", str(created["pane_id"]), label)
+    return str(created["tab_id"]), str(created["pane_id"])
+
+
+def start_editor(pane_id: str, root: Path, socket: Path, target: Path | None, line: int | None) -> None:
+    deadline = time.monotonic() + 15
+    foreground: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        if server_available(socket):
+            remote_open(socket, target, line)
+            return
+        process = herdr("pane", "process-info", "--pane", pane_id)
+        process_info = process.get("result", {}).get("process_info", {})
+        foreground = active_foreground_processes(process_info)
+        if not foreground:
+            break
+        time.sleep(0.1)
+    if foreground:
+        names = ", ".join(str(item.get("name") or item.get("cmdline") or "process") for item in foreground)
+        raise EditorError(
+            f"editor pane is running {names}, but its RPC socket is unavailable; close it before reopening"
+        )
+    try:
+        socket.unlink(missing_ok=True)
+    except OSError as error:
+        raise EditorError(f"could not remove stale Neovim socket: {error}") from error
+    args = ["nvim", "--listen", str(socket)]
+    environment = ["NVIM_WORKSPACE_EDITOR=1"]
+    if target:
+        environment.append(f"NVIM_WORKSPACE_TARGET={shlex.quote(str(target))}")
+    if line:
+        environment.append(f"NVIM_WORKSPACE_LINE={line}")
+    nvim_command = " ".join(shlex.quote(arg) for arg in args)
+    shell_command = (
+        f"cd -- {shlex.quote(str(root))} && "
+        f"{' '.join(environment)} {nvim_command}"
+    )
+    herdr("pane", "run", pane_id, shell_command)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="open a project-scoped Neovim instance in Herdr")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--split", action="store_true", help="reuse a split in the invoking tab")
+    mode.add_argument("--tab", action="store_true", help="reuse a dedicated workspace tab (default)")
+    parser.add_argument("location", nargs="?", help="project file, optionally followed by :line")
+    args = parser.parse_args(argv)
+
+    if os.environ.get("HERDR_ENV") != "1" and not os.environ.get("HERDR_SOCKET_PATH"):
+        raise EditorError("workspace-editor must run inside a Herdr session")
+    if shutil.which("nvim") is None:
+        raise EditorError("nvim is not available on PATH")
+
+    process_cwd = Path.cwd().resolve()
+    workspace = focused_workspace()
+    workspace_id = str(workspace["workspace_id"])
+    source = source_pane(workspace_id, process_cwd)
+    source_cwd = source.get("foreground_cwd") or source.get("cwd")
+    cwd = Path(source_cwd).resolve() if source_cwd else process_cwd
+    root = project_root(cwd)
+    target, line = resolve_target(root, cwd, args.location)
+    mode_name = "split" if args.split else "tab"
+    root_name = root.name or "project"
+    root_id = short_hash(str(root), length=8)
+
+    if args.split:
+        label = f"Editor · {root_name} · {root_id} · split"
+        tab_id, pane_id = find_or_create_split(workspace_id, source, root, label)
+        socket = socket_path(workspace_id, root, mode_name, str(source["tab_id"]))
+    else:
+        label = f"Editor · {root_name} · {root_id}"
+        tab_id, pane_id = find_or_create_tab(workspace_id, root, label)
+        socket = socket_path(workspace_id, root, mode_name, None)
+
+    # Focus immediately when reusing an existing target; startup or RPC checks
+    # should not leave the user in the invoking tab.
+    focus_pane(tab_id, pane_id)
+
+    if server_available(socket):
+        remote_open(socket, target, line)
+    else:
+        start_editor(pane_id, root, socket, target, line)
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except EditorError as error:
+        print(f"workspace-editor: {error}", file=sys.stderr)
+        raise SystemExit(1)

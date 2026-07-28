@@ -14,7 +14,7 @@ stow -t ~ pi herdr hunk portd nvim
 ## Packages
 
 - `pi` — Pi settings, keybindings, themes, and locally maintained extensions.
-- `nvim` — global Neovim configuration shared with Pi's file viewer.
+- `nvim` — native-package Neovim workspace configuration used by the standalone Herdr editor.
 - `herdr` — Herdr keybindings, UI preferences, notifications, and custom commands.
 - `hunk` — Hunk custom Catppuccin Mocha review theme.
 - `portd` — automatic SSH development-port forwarding source and Herdr plugin.

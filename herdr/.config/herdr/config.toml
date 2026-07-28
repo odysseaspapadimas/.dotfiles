@@ -73,6 +73,26 @@ height = "82%"
 description = "project scripts"
 
 [[keys.command]]
+key = "prefix+f"
+type = "shell"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" workspace-editor"
+description = "focus workspace editor tab"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "shell"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" workspace-editor --split"
+description = "focus workspace editor split"
+
+[[keys.command]]
+key = "prefix+g"
+type = "popup"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" workspace-git"
+width = "90%"
+height = "90%"
+description = "Git status and history"
+
+[[keys.command]]
 key = "prefix+d"
 type = "popup"
 command = "/bin/sh \"$HOME/.config/herdr/popup-env\" drop"

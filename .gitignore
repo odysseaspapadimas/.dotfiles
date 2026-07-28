@@ -1,6 +1,8 @@
 .DS_Store
 *~
 *.swp
+__pycache__/
+*.pyc
 
 # Never track dependency installs or generated package trees
 **/node_modules/
