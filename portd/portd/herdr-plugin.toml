@@ -2,7 +2,7 @@ id = "dev.odysseas.portd"
 name = "Development ports"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
-description = "Discover and control Mac forwards for services running on the remote host"
+description = "Discover and control loopback-only forwards between the Mac and remote host"
 platforms = ["linux", "macos"]
 
 [[actions]]

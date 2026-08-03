@@ -7,6 +7,8 @@ pub struct DaemonStatus {
     pub last_error: Option<String>,
     pub last_scan_ms: Option<u128>,
     pub tunnels: Vec<TunnelStatus>,
+    #[serde(default)]
+    pub reverse_tunnels: Vec<ReverseTunnelStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +19,14 @@ pub struct TunnelStatus {
     pub label: String,
     #[serde(default)]
     pub group: String,
+    pub process: String,
+    pub state: TunnelState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseTunnelStatus {
+    pub remote_port: u16,
+    pub local_port: u16,
     pub process: String,
     pub state: TunnelState,
 }

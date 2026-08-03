@@ -8,6 +8,24 @@ opt.wrap = false
 opt.termguicolors = true
 opt.mouse = "a"
 opt.clipboard = "unnamedplus"
+
+-- Route clipboard access through the attached terminal so Herdr remote sessions
+-- update the client's clipboard instead of the server's graphical clipboard.
+if vim.env.HERDR_ENV == "1" then
+  local osc52 = require("vim.ui.clipboard.osc52")
+  vim.g.clipboard = {
+    name = "OSC 52 (Herdr)",
+    copy = {
+      ["+"] = osc52.copy("+"),
+      ["*"] = osc52.copy("*"),
+    },
+    paste = {
+      ["+"] = osc52.paste("+"),
+      ["*"] = osc52.paste("*"),
+    },
+  }
+end
+
 opt.ignorecase = true
 opt.smartcase = true
 opt.scrolloff = 4

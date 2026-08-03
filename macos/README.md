@@ -4,8 +4,9 @@ Mac-side services for remote Herdr development.
 
 ## Contents
 
-- `dev.odysseas.portd.plist` starts portd and maintains both development-port
-  forwards and the Browser Control reverse forward.
+- `dev.odysseas.portd.plist` starts portd. Development forwards and persisted
+  Mac-to-Ubuntu service mappings are managed through `ports`; the launch agent
+  contains no application-specific ports.
 - `dev.odysseas.browser-control.plist` keeps the local Browser Control relay
   running.
 - `browser-control-launch` applies the temporary unpacked-extension compatibility
@@ -52,6 +53,7 @@ Enable it only in that profile; two active copies compete for the relay.
 ```bash
 launchctl list | grep -E 'portd|browser-control'
 curl -fsS http://127.0.0.1:43117/api/status | jq
+ports  # press 1/2 or tab to switch forwarding direction
 browser-control status
 
 tail -f ~/.local/state/portd/portd.log

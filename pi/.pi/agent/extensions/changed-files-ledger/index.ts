@@ -219,6 +219,19 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
 
   pi.on("resources_discover", () => ({ skillPaths: [bundledHunkSkillPath] }));
 
+  function isExpectedDisabledReason(reason: string): boolean {
+    return reason.includes("Changed-files ledger disabled:");
+  }
+
+  async function ledgerReady(): Promise<boolean> {
+    try {
+      await initialized;
+      return !!ledger?.index;
+    } catch {
+      return false;
+    }
+  }
+
   function updateDisabledStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI || widgetHidden) return;
     const detail = disabledReason?.includes("not inside a Git worktree")
@@ -320,15 +333,14 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
       await refreshStats(ctx);
     } catch (error) {
       disabledReason = String(error);
-      ctx.ui.notify(disabledReason, "warning");
+      if (!isExpectedDisabledReason(disabledReason)) ctx.ui.notify(disabledReason, "warning");
       ctx.ui.setWidget(WIDGET_ID, undefined);
       updateDisabledStatus(ctx);
     }
   });
 
   pi.on("agent_start", async (_event, ctx) => {
-    await initialized;
-    if (!ledger || draft) return;
+    if (!(await ledgerReady()) || !ledger || draft) return;
     const source = triggeringUserMessage(ctx.sessionManager.getBranch() as SessionEntryLike[]);
     draft = await ledger.beginTurn(nextTurnIndex, Date.now(), source);
     nextTurnIndex += 1;
@@ -339,8 +351,7 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    await initialized;
-    if (!ledger || !draft) return;
+    if (!(await ledgerReady()) || !ledger || !draft) return;
     try {
       const record = await ledger.finishTurn(draft, Date.now());
       draft = undefined;

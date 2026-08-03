@@ -21,7 +21,7 @@ use tokio::{
     sync::{Mutex, RwLock, mpsc},
 };
 
-use crate::protocol::{DaemonStatus, TunnelState, TunnelStatus};
+use crate::protocol::{DaemonStatus, ReverseTunnelStatus, TunnelState, TunnelStatus};
 
 #[derive(Debug)]
 pub struct Config {
@@ -48,7 +48,7 @@ struct ManagedTunnel {
     state: TunnelState,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Preferences {
     disabled: BTreeSet<u16>,
@@ -57,6 +57,7 @@ struct Preferences {
     groups: BTreeMap<u16, String>,
     group_order: Vec<String>,
     port_order: BTreeMap<String, Vec<u16>>,
+    reverse_forwards: BTreeMap<u16, u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,11 +84,11 @@ struct Runtime {
     preferences_path: PathBuf,
     preferences: Preferences,
     tunnels: BTreeMap<u16, ManagedTunnel>,
+    local_listeners: BTreeMap<u16, Listener>,
     master: Option<Child>,
     reverse_ready: bool,
     reverse_error: Option<String>,
     last_reverse_attempt: Option<tokio::time::Instant>,
-    reverse_forwards: Vec<(u16, u16)>,
     service_reverse_ready: BTreeSet<(u16, u16)>,
     last_service_reverse_attempt: Option<tokio::time::Instant>,
     connected: bool,
@@ -110,7 +111,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .control_path
         .unwrap_or_else(|| config_dir.join("ssh-control"));
     let preferences_path = config_dir.join("state.json");
-    let preferences = read_preferences(&preferences_path);
+    let mut preferences = read_preferences(&preferences_path);
+    let mut preferences_changed = false;
+    for (remote_port, local_port) in config.reverse_forwards {
+        if preferences.reverse_forwards.insert(remote_port, local_port) != Some(local_port) {
+            preferences_changed = true;
+        }
+    }
+    if preferences_changed {
+        write_preferences(&preferences_path, &preferences)?;
+    }
 
     let status = Arc::new(RwLock::new(DaemonStatus {
         host: config.host.clone(),
@@ -118,6 +128,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         last_error: None,
         last_scan_ms: None,
         tunnels: Vec::new(),
+        reverse_tunnels: Vec::new(),
     }));
     let runtime = Arc::new(Mutex::new(Runtime {
         host: config.host,
@@ -127,11 +138,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         preferences_path,
         preferences,
         tunnels: BTreeMap::new(),
+        local_listeners: BTreeMap::new(),
         master: None,
         reverse_ready: false,
         reverse_error: None,
         last_reverse_attempt: None,
-        reverse_forwards: config.reverse_forwards,
         service_reverse_ready: BTreeSet::new(),
         last_service_reverse_attempt: None,
         connected: false,
@@ -153,6 +164,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .route("/api/tunnels/{port}/group", post(api_group))
         .route("/api/tunnels/{port}/move", post(api_move))
         .route("/api/tunnels/{port}/open", post(api_open))
+        .route(
+            "/api/reverse/{remote_port}/{local_port}/toggle",
+            post(api_reverse_toggle),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.api_port))
         .await
@@ -221,8 +236,28 @@ async fn reconcile(
     if let Some(error) = ensure_service_reverse_forwards(&mut runtime).await {
         reverse_error = Some(error);
     }
+    runtime.local_listeners = discover_local_listeners().await;
+    let api_port = runtime.api_port;
+    runtime.local_listeners.remove(&api_port);
+    let forwarded_local_ports = runtime
+        .tunnels
+        .values()
+        .filter_map(|tunnel| tunnel.local_port)
+        .collect::<Vec<_>>();
+    for port in forwarded_local_ports {
+        runtime.local_listeners.remove(&port);
+    }
     let output = ssh_output(&runtime, &["ss", "-H", "-ltnp"]).await?;
     let mut listeners = parse_listeners(&output);
+    for port in &runtime.preferences.manual {
+        listeners.entry(*port).or_insert_with(|| Listener {
+            port: *port,
+            process: String::new(),
+        });
+    }
+    for (port, _) in &runtime.service_reverse_ready {
+        listeners.remove(port);
+    }
     listeners.retain(|port, _| {
         *port <= runtime.max_auto_port || runtime.preferences.manual.contains(port)
     });
@@ -430,7 +465,7 @@ async fn ensure_reverse_forward(runtime: &mut Runtime) -> Option<String> {
 }
 
 async fn ensure_service_reverse_forwards(runtime: &mut Runtime) -> Option<String> {
-    if runtime.service_reverse_ready.len() == runtime.reverse_forwards.len() {
+    if runtime.service_reverse_ready.len() == runtime.preferences.reverse_forwards.len() {
         return None;
     }
     let now = tokio::time::Instant::now();
@@ -443,39 +478,17 @@ async fn ensure_service_reverse_forwards(runtime: &mut Runtime) -> Option<String
     runtime.last_service_reverse_attempt = Some(now);
 
     let pending = runtime
+        .preferences
         .reverse_forwards
         .iter()
-        .copied()
+        .map(|(&remote_port, &local_port)| (remote_port, local_port))
         .filter(|forward| !runtime.service_reverse_ready.contains(forward))
         .collect::<Vec<_>>();
+    let mut first_error = None;
     for (remote_port, local_port) in pending {
-        let spec = format!("127.0.0.1:{remote_port}:127.0.0.1:{local_port}");
-        let output = match Command::new("ssh")
-            .arg("-S")
-            .arg(&runtime.control_path)
-            .args(["-O", "forward", "-R", &spec])
-            .arg(&runtime.host)
-            .stdin(Stdio::null())
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(error) => {
-                return Some(format!(
-                    "reverse forward localhost:{remote_port} -> local:{local_port} unavailable: {error}"
-                ));
-            }
-        };
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Some(format!(
-                "reverse forward localhost:{remote_port} -> local:{local_port} unavailable{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {detail}")
-                }
-            ));
+        if let Err(error) = start_reverse_forward(runtime, remote_port, local_port).await {
+            first_error.get_or_insert_with(|| error.to_string());
+            continue;
         }
         runtime
             .service_reverse_ready
@@ -485,7 +498,56 @@ async fn ensure_service_reverse_forwards(runtime: &mut Runtime) -> Option<String
             runtime.host
         );
     }
-    None
+    first_error
+}
+
+async fn start_reverse_forward(
+    runtime: &Runtime,
+    remote_port: u16,
+    local_port: u16,
+) -> anyhow::Result<()> {
+    let spec = format!("127.0.0.1:{remote_port}:127.0.0.1:{local_port}");
+    let output = Command::new("ssh")
+        .arg("-S")
+        .arg(&runtime.control_path)
+        .args(["-O", "forward", "-R", &spec])
+        .arg(&runtime.host)
+        .stdin(Stdio::null())
+        .output()
+        .await?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "reverse forward localhost:{remote_port} -> local:{local_port} unavailable{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    Ok(())
+}
+
+async fn cancel_reverse_forward(
+    runtime: &Runtime,
+    remote_port: u16,
+    local_port: u16,
+) -> anyhow::Result<()> {
+    let spec = format!("127.0.0.1:{remote_port}:127.0.0.1:{local_port}");
+    let output = Command::new("ssh")
+        .arg("-S")
+        .arg(&runtime.control_path)
+        .args(["-O", "cancel", "-R", &spec])
+        .arg(&runtime.host)
+        .stdin(Stdio::null())
+        .output()
+        .await?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("failed to cancel reverse localhost:{remote_port}: {detail}");
+    }
+    Ok(())
 }
 
 async fn master_healthy(runtime: &Runtime) -> bool {
@@ -588,6 +650,61 @@ fn port_available(port: u16) -> bool {
     TcpListener::bind((Ipv6Addr::LOCALHOST, port)).is_ok()
 }
 
+async fn discover_local_listeners() -> BTreeMap<u16, Listener> {
+    let lsof = if std::path::Path::new("/usr/sbin/lsof").exists() {
+        "/usr/sbin/lsof"
+    } else {
+        "lsof"
+    };
+    let Ok(output) = Command::new(lsof)
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+    else {
+        return BTreeMap::new();
+    };
+    parse_lsof_listeners(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_lsof_listeners(output: &str) -> BTreeMap<u16, Listener> {
+    let mut listeners = BTreeMap::new();
+    let mut process = String::new();
+    for line in output.lines() {
+        let Some((field, value)) = line.split_at_checked(1) else {
+            continue;
+        };
+        match field {
+            "p" => process.clear(),
+            "c" => process = value.to_string(),
+            "n" => {
+                let ipv4_reachable = value.starts_with("127.0.0.1:")
+                    || value.starts_with("0.0.0.0:")
+                    || value.starts_with("*:");
+                if !ipv4_reachable {
+                    continue;
+                }
+                let Some(port) = value
+                    .rsplit(':')
+                    .next()
+                    .and_then(|value| value.parse::<u16>().ok())
+                else {
+                    continue;
+                };
+                if port < 1024 {
+                    continue;
+                }
+                listeners.entry(port).or_insert_with(|| Listener {
+                    port,
+                    process: process.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    listeners
+}
+
 fn parse_listeners(output: &str) -> BTreeMap<u16, Listener> {
     let mut listeners = BTreeMap::new();
     for line in output.lines() {
@@ -633,10 +750,26 @@ async fn api_refresh(State(state): State<AppState>) -> StatusCode {
 }
 
 async fn api_toggle(State(state): State<AppState>, Path(port): Path<u16>) -> Response {
+    if port < 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "port must be between 1024 and 65535",
+        )
+            .into_response();
+    }
     let mut runtime = state.runtime.lock().await;
-    let Some(existing) = runtime.tunnels.get(&port).cloned() else {
-        return (StatusCode::NOT_FOUND, "remote port is not listening").into_response();
-    };
+    let existing = runtime
+        .tunnels
+        .entry(port)
+        .or_insert_with(|| ManagedTunnel {
+            listener: Listener {
+                port,
+                process: String::new(),
+            },
+            local_port: None,
+            state: TunnelState::Available,
+        })
+        .clone();
     if let Some(local_port) = existing.local_port {
         if let Err(error) = cancel_forward(&runtime, local_port, port).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
@@ -664,6 +797,82 @@ async fn api_toggle(State(state): State<AppState>, Path(port): Path<u16>) -> Res
         return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
     }
     publish_status(&runtime, &state.status).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn api_reverse_toggle(
+    State(state): State<AppState>,
+    Path((remote_port, local_port)): Path<(u16, u16)>,
+) -> Response {
+    if remote_port < 1024 || local_port < 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "ports must be between 1024 and 65535",
+        )
+            .into_response();
+    }
+    let mut runtime = state.runtime.lock().await;
+    if remote_port == runtime.api_port {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the portd control port cannot be managed as a service reverse",
+        )
+            .into_response();
+    }
+
+    match runtime
+        .preferences
+        .reverse_forwards
+        .get(&remote_port)
+        .copied()
+    {
+        Some(existing_local) if existing_local == local_port => {
+            let was_ready = runtime
+                .service_reverse_ready
+                .contains(&(remote_port, local_port));
+            if was_ready
+                && let Err(error) = cancel_reverse_forward(&runtime, remote_port, local_port).await
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+            let mut next = runtime.preferences.clone();
+            next.reverse_forwards.remove(&remote_port);
+            if let Err(error) = write_preferences(&runtime.preferences_path, &next) {
+                if was_ready
+                    && start_reverse_forward(&runtime, remote_port, local_port)
+                        .await
+                        .is_err()
+                {
+                    runtime
+                        .service_reverse_ready
+                        .remove(&(remote_port, local_port));
+                }
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+            runtime.preferences = next;
+            runtime
+                .service_reverse_ready
+                .remove(&(remote_port, local_port));
+        }
+        Some(existing_local) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("Ubuntu port {remote_port} is already mapped to Mac port {existing_local}"),
+            )
+                .into_response();
+        }
+        None => {
+            let mut next = runtime.preferences.clone();
+            next.reverse_forwards.insert(remote_port, local_port);
+            if let Err(error) = write_preferences(&runtime.preferences_path, &next) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+            runtime.preferences = next;
+        }
+    }
+    runtime.last_service_reverse_attempt = None;
+    publish_status(&runtime, &state.status).await;
+    let _ = state.wake.try_send(());
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -823,12 +1032,65 @@ async fn publish_status(runtime: &Runtime, status: &RwLock<DaemonStatus>) {
         })
         .collect::<Vec<_>>();
     tunnels.sort_by_key(|tunnel| tunnel_sort_key(&runtime.preferences, tunnel));
+
+    let configured_remote_ports = runtime
+        .preferences
+        .reverse_forwards
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let configured_local_ports = runtime
+        .preferences
+        .reverse_forwards
+        .values()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut reverse_tunnels = runtime
+        .preferences
+        .reverse_forwards
+        .iter()
+        .map(|(&remote_port, &local_port)| ReverseTunnelStatus {
+            remote_port,
+            local_port,
+            process: runtime
+                .local_listeners
+                .get(&local_port)
+                .map(|listener| listener.process.clone())
+                .unwrap_or_default(),
+            state: if runtime
+                .service_reverse_ready
+                .contains(&(remote_port, local_port))
+            {
+                TunnelState::Active
+            } else {
+                TunnelState::Error
+            },
+        })
+        .collect::<Vec<_>>();
+    reverse_tunnels.extend(
+        runtime
+            .local_listeners
+            .values()
+            .filter(|listener| {
+                !configured_remote_ports.contains(&listener.port)
+                    && !configured_local_ports.contains(&listener.port)
+            })
+            .map(|listener| ReverseTunnelStatus {
+                remote_port: listener.port,
+                local_port: listener.port,
+                process: listener.process.clone(),
+                state: TunnelState::Available,
+            }),
+    );
+    reverse_tunnels.sort_by_key(|tunnel| (tunnel.remote_port, tunnel.local_port));
+
     *status.write().await = DaemonStatus {
         host: runtime.host.clone(),
         connected: runtime.connected,
         last_error: runtime.last_error.clone(),
         last_scan_ms: runtime.last_scan_ms,
         tunnels,
+        reverse_tunnels,
     };
 }
 
@@ -952,7 +1214,9 @@ fn read_preferences(path: &PathBuf) -> Preferences {
 
 fn write_preferences(path: &PathBuf, preferences: &Preferences) -> anyhow::Result<()> {
     let content = serde_json::to_string_pretty(preferences)?;
-    std::fs::write(path, content)?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, content)?;
+    std::fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -1018,6 +1282,32 @@ mod tests {
         );
         assert_eq!(ports[&5173].process, "node");
         assert_eq!(ports[&8000].process, "php8.5");
+    }
+
+    #[test]
+    fn parses_lsof_listener_fields() {
+        let output = concat!(
+            "p123\n",
+            "cBrowser Control\n",
+            "n127.0.0.1:19989\n",
+            "p456\n",
+            "cadb\n",
+            "n127.0.0.1:5037\n",
+            "n[::1]:5037\n",
+            "p789\n",
+            "cipv6-only\n",
+            "n[::1]:6000\n",
+            "p790\n",
+            "clan-only\n",
+            "n192.168.1.12:7000\n",
+            "p791\n",
+            "csshd\n",
+            "n*:22\n",
+        );
+        let ports = parse_lsof_listeners(output);
+        assert_eq!(ports.keys().copied().collect::<Vec<_>>(), vec![5037, 19989]);
+        assert_eq!(ports[&5037].process, "adb");
+        assert_eq!(ports[&19989].process, "Browser Control");
     }
 
     #[test]

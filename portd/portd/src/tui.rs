@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
-use crate::protocol::{DaemonStatus, TunnelState, TunnelStatus};
+use crate::protocol::{DaemonStatus, ReverseTunnelStatus, TunnelState, TunnelStatus};
 
 #[derive(Debug)]
 pub struct Config {
@@ -65,12 +65,22 @@ struct App {
     message: String,
     label_input: Option<(u16, String)>,
     group_input: Option<(u16, String)>,
+    port_input: Option<String>,
+    reverse_mode: bool,
 }
 
 #[derive(Debug, Clone)]
 enum DisplayRow {
     Group { name: String, count: usize },
     Tunnel(TunnelStatus),
+    Reverse(ReverseTunnelStatus),
+}
+
+fn parse_reverse_spec(input: &str) -> Option<(u16, u16)> {
+    let (remote, local) = input.split_once(':').unwrap_or((input, input));
+    let remote = remote.parse::<u16>().ok()?;
+    let local = local.parse::<u16>().ok()?;
+    (remote >= 1024 && local >= 1024).then_some((remote, local))
 }
 
 impl App {
@@ -85,6 +95,8 @@ impl App {
             message: "connecting to portd".to_string(),
             label_input: None,
             group_input: None,
+            port_input: None,
+            reverse_mode: false,
         }
     }
 
@@ -104,6 +116,10 @@ impl App {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    if self.port_input.is_some() {
+                        self.handle_port_key(key.code).await;
+                        continue;
+                    }
                     if self.group_input.is_some() {
                         self.handle_group_key(key.code).await;
                         continue;
@@ -114,9 +130,13 @@ impl App {
                     }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Tab | KeyCode::Char('1') | KeyCode::Char('2') => {
+                            self.switch_mode(key.code)
+                        }
                         KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
                         KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
                         KeyCode::Char('x') | KeyCode::Enter => self.toggle().await,
+                        KeyCode::Char('m') => self.port_input = Some(String::new()),
                         KeyCode::Char('o') => self.open().await,
                         KeyCode::Char('l') => self.begin_label(),
                         KeyCode::Char('g') => self.begin_group(),
@@ -183,11 +203,15 @@ impl App {
         let index = self.table.selected()?;
         match self.display_rows().get(index)? {
             DisplayRow::Tunnel(tunnel) => Some(tunnel.remote_port),
+            DisplayRow::Reverse(tunnel) => Some(tunnel.remote_port),
             DisplayRow::Group { .. } => None,
         }
     }
 
     fn selected_tunnel(&self) -> Option<TunnelStatus> {
+        if self.reverse_mode {
+            return None;
+        }
         let port = self.selected_port()?;
         self.status
             .as_ref()?
@@ -197,10 +221,32 @@ impl App {
             .cloned()
     }
 
+    fn selected_reverse(&self) -> Option<ReverseTunnelStatus> {
+        if !self.reverse_mode {
+            return None;
+        }
+        let port = self.selected_port()?;
+        self.status
+            .as_ref()?
+            .reverse_tunnels
+            .iter()
+            .find(|tunnel| tunnel.remote_port == port)
+            .cloned()
+    }
+
     fn display_rows(&self) -> Vec<DisplayRow> {
         let Some(status) = &self.status else {
             return Vec::new();
         };
+        if self.reverse_mode {
+            return status
+                .reverse_tunnels
+                .iter()
+                .cloned()
+                .map(DisplayRow::Reverse)
+                .collect();
+        }
+
         let mut rows = Vec::new();
         let mut current_group: Option<&str> = None;
         for tunnel in &status.tunnels {
@@ -229,7 +275,9 @@ impl App {
         self.display_rows()
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| matches!(row, DisplayRow::Tunnel(_)).then_some(index))
+            .filter_map(|(index, row)| {
+                matches!(row, DisplayRow::Tunnel(_) | DisplayRow::Reverse(_)).then_some(index)
+            })
             .collect()
     }
 
@@ -237,32 +285,109 @@ impl App {
         let rows = self.display_rows();
         let selected = port
             .and_then(|port| {
-                rows.iter().position(
-                    |row| matches!(row, DisplayRow::Tunnel(tunnel) if tunnel.remote_port == port),
-                )
+                rows.iter().position(|row| match row {
+                    DisplayRow::Tunnel(tunnel) => tunnel.remote_port == port,
+                    DisplayRow::Reverse(tunnel) => tunnel.remote_port == port,
+                    DisplayRow::Group { .. } => false,
+                })
             })
             .or_else(|| {
                 rows.iter()
-                    .position(|row| matches!(row, DisplayRow::Tunnel(_)))
+                    .position(|row| matches!(row, DisplayRow::Tunnel(_) | DisplayRow::Reverse(_)))
             });
         self.table.select(selected);
     }
 
+    fn switch_mode(&mut self, key: KeyCode) {
+        self.reverse_mode = match key {
+            KeyCode::Char('1') => false,
+            KeyCode::Char('2') => true,
+            _ => !self.reverse_mode,
+        };
+        self.table.select(None);
+        self.restore_selection(None);
+        self.message = if self.reverse_mode {
+            "Mac services exposed on Ubuntu".to_string()
+        } else {
+            "Ubuntu services available on Mac".to_string()
+        };
+    }
+
     async fn toggle(&mut self) {
-        if let Some(port) = self.selected_port() {
+        if let Some(tunnel) = self.selected_reverse() {
+            self.post(&format!(
+                "/api/reverse/{}/{}/toggle",
+                tunnel.remote_port, tunnel.local_port
+            ))
+            .await;
+            self.refresh().await;
+        } else if let Some(port) = self.selected_port() {
             self.post(&format!("/api/tunnels/{port}/toggle")).await;
             self.refresh().await;
         }
     }
 
     async fn open(&mut self) {
-        if let Some(port) = self.selected_port() {
+        if self.reverse_mode {
+            self.message = "open is only available for Mac-facing forwards".to_string();
+        } else if let Some(port) = self.selected_port() {
             self.post(&format!("/api/tunnels/{port}/open")).await;
+        }
+    }
+
+    async fn handle_port_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.port_input = None;
+                self.message = "manual port cancelled".to_string();
+            }
+            KeyCode::Enter => {
+                let input = self.port_input.take().unwrap_or_default();
+                if self.reverse_mode {
+                    match parse_reverse_spec(&input) {
+                        Some((remote_port, local_port)) => {
+                            self.post(&format!("/api/reverse/{remote_port}/{local_port}/toggle"))
+                                .await;
+                            self.refresh().await;
+                            self.restore_selection(Some(remote_port));
+                        }
+                        None => {
+                            self.message = "enter UBUNTU_PORT or UBUNTU_PORT:MAC_PORT".to_string()
+                        }
+                    }
+                } else {
+                    match input.parse::<u16>() {
+                        Ok(port) if port >= 1024 => {
+                            self.post(&format!("/api/tunnels/{port}/toggle")).await;
+                            self.refresh().await;
+                            self.restore_selection(Some(port));
+                        }
+                        _ => self.message = "port must be between 1024 and 65535".to_string(),
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.port_input {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if character.is_ascii_digit() || (self.reverse_mode && character == ':') =>
+            {
+                if let Some(input) = &mut self.port_input
+                    && input.len() < 11
+                    && (character != ':' || !input.contains(':'))
+                {
+                    input.push(character);
+                }
+            }
+            _ => {}
         }
     }
 
     fn begin_label(&mut self) {
         let Some(tunnel) = self.selected_tunnel() else {
+            self.message = "labels currently apply to Mac-facing forwards".to_string();
             return;
         };
         self.label_input = Some((tunnel.remote_port, tunnel.label.clone()));
@@ -270,6 +395,7 @@ impl App {
 
     fn begin_group(&mut self) {
         let Some(tunnel) = self.selected_tunnel() else {
+            self.message = "groups currently apply to Mac-facing forwards".to_string();
             return;
         };
         self.group_input = Some((tunnel.remote_port, tunnel.group));
@@ -372,6 +498,10 @@ impl App {
     }
 
     async fn move_selected(&mut self, scope: &str, direction: i8) {
+        if self.reverse_mode {
+            self.message = "ordering currently applies to Mac-facing forwards".to_string();
+            return;
+        }
         let Some(port) = self.selected_port() else {
             return;
         };
@@ -434,15 +564,30 @@ impl App {
         } else {
             Color::Yellow
         };
+        let active_tab = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled(" ports  ", active_tab),
                 Span::styled(
-                    " ports ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    "[1] Mac → Ubuntu",
+                    if self.reverse_mode {
+                        Style::default()
+                    } else {
+                        active_tab
+                    },
                 ),
-                Span::raw(format!("{host}  ")),
+                Span::raw("  "),
+                Span::styled(
+                    "[2] Ubuntu → Mac",
+                    if self.reverse_mode {
+                        active_tab
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw(format!("    {host}  ")),
                 Span::styled(indicator, Style::default().fg(indicator_color)),
             ]))
             .block(Block::default().borders(Borders::ALL)),
@@ -498,9 +643,29 @@ impl App {
                         Cell::from(url),
                     ])
                 }
+                DisplayRow::Reverse(tunnel) => {
+                    let color = match tunnel.state {
+                        TunnelState::Active => Color::Green,
+                        TunnelState::Disabled => Color::DarkGray,
+                        TunnelState::Error => Color::Red,
+                        TunnelState::Available => Color::Yellow,
+                    };
+                    Row::new(vec![
+                        Cell::from(tunnel.state.label()).style(Style::default().fg(color)),
+                        Cell::from(tunnel.remote_port.to_string()),
+                        Cell::from(tunnel.local_port.to_string()),
+                        Cell::from("-"),
+                        Cell::from(if tunnel.process.is_empty() {
+                            "-".to_string()
+                        } else {
+                            tunnel.process
+                        }),
+                        Cell::from(format!("localhost:{}", tunnel.remote_port)),
+                    ])
+                }
             })
             .collect::<Vec<_>>();
-        let header = Row::new(["STATE", "REMOTE", "LOCAL", "LABEL", "PROCESS", "ADDRESS"]).style(
+        let header = Row::new(["STATE", "UBUNTU", "MAC", "LABEL", "PROCESS", "ADDRESS"]).style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -523,10 +688,31 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("› ")
-        .block(Block::default().title(" listeners ").borders(Borders::ALL));
+        .block(
+            Block::default()
+                .title(if self.reverse_mode {
+                    " Mac services exposed on Ubuntu "
+                } else {
+                    " Ubuntu services available on Mac "
+                })
+                .borders(Borders::ALL),
+        );
         frame.render_stateful_widget(table, areas[1], &mut self.table);
 
-        let footer = if let Some((port, group)) = &self.group_input {
+        let footer = if let Some(port) = &self.port_input {
+            vec![Line::from(vec![
+                Span::styled(
+                    if self.reverse_mode {
+                        "Ubuntu[:Mac] ports: "
+                    } else {
+                        "manual Ubuntu port: "
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(port, Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("  enter toggle  esc cancel"),
+            ])]
+        } else if let Some((port, group)) = &self.group_input {
             vec![Line::from(vec![
                 Span::styled(format!("group {port}: "), Style::default().fg(Color::Cyan)),
                 Span::styled(group, Style::default().add_modifier(Modifier::BOLD)),
@@ -538,6 +724,24 @@ impl App {
                 Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw("  enter save  esc cancel"),
             ])]
+        } else if self.reverse_mode {
+            vec![
+                Line::from(vec![
+                    Span::styled("j/k", Style::default().fg(Color::Cyan)),
+                    Span::raw(" move  "),
+                    Span::styled("x", Style::default().fg(Color::Cyan)),
+                    Span::raw(" expose/remove  "),
+                    Span::styled("m", Style::default().fg(Color::Cyan)),
+                    Span::raw(" manual  "),
+                    Span::styled("tab", Style::default().fg(Color::Cyan)),
+                    Span::raw(" direction  "),
+                    Span::styled("r", Style::default().fg(Color::Cyan)),
+                    Span::raw(" refresh  "),
+                    Span::styled("q", Style::default().fg(Color::Cyan)),
+                    Span::raw(" quit"),
+                ]),
+                Line::from(self.message.clone()),
+            ]
         } else {
             vec![
                 Line::from(vec![
@@ -545,6 +749,8 @@ impl App {
                     Span::raw(" move  "),
                     Span::styled("x", Style::default().fg(Color::Cyan)),
                     Span::raw(" toggle  "),
+                    Span::styled("m", Style::default().fg(Color::Cyan)),
+                    Span::raw(" manual  "),
                     Span::styled("l", Style::default().fg(Color::Cyan)),
                     Span::raw(" label  "),
                     Span::styled("g", Style::default().fg(Color::Cyan)),
@@ -565,5 +771,18 @@ impl App {
             ]
         };
         frame.render_widget(Paragraph::new(footer), areas[2]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_reverse_spec;
+
+    #[test]
+    fn parses_same_and_distinct_reverse_ports() {
+        assert_eq!(parse_reverse_spec("5037"), Some((5037, 5037)));
+        assert_eq!(parse_reverse_spec("5038:5037"), Some((5038, 5037)));
+        assert_eq!(parse_reverse_spec("22"), None);
+        assert_eq!(parse_reverse_spec("5037:"), None);
     }
 }

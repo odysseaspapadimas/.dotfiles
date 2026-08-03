@@ -171,6 +171,7 @@ export function sideStatusLabel(
 
 export default function herdrSideChat(pi: ExtensionAPI) {
   let inheritedMessages: ReturnType<typeof buildSessionContext>["messages"] = [];
+  let inheritedNativeCheckpoint = false;
   let sidePaneId: string | undefined;
   let mailboxWatcher: FSWatcher | undefined;
   let mailboxRetry: ReturnType<typeof setTimeout> | undefined;
@@ -603,11 +604,36 @@ export default function herdrSideChat(pi: ExtensionAPI) {
 
       try {
         const source = SessionManager.open(SOURCE_SESSION);
-        const entries = source.getEntries();
-        const leaf = sourceLeaf ?? source.getLeafId() ?? undefined;
+        const entries = source.getBranch(sourceLeaf ?? source.getLeafId() ?? undefined);
+        const leaf = entries.at(-1)?.id;
         inheritedMessages = buildSessionContext(entries, leaf).messages;
+
+        // Native Codex compaction is an opaque provider checkpoint, not a text
+        // summary. buildSessionContext() cannot carry it into this independent
+        // ephemeral session, so mirror the checkpoint and its source tail into
+        // the side branch. The compaction extension can then replay the compacted
+        // history instead of recompacting the inherited conversation itself.
+        const checkpointIndex = entries.findLastIndex((entry) =>
+          (entry.type === "compaction" && (entry.details as { kind?: unknown } | undefined)?.kind === "openai-codex-native-compaction") ||
+          (entry.type === "custom" && entry.customType === "openai-codex-native-compaction")
+        );
+        if (checkpointIndex >= 0) {
+          const checkpoint = entries[checkpointIndex]!;
+          const details = checkpoint.type === "compaction" ? checkpoint.details : checkpoint.data;
+          pi.appendEntry("openai-codex-native-compaction", details);
+          for (const entry of entries.slice(checkpointIndex + 1)) {
+            if (entry.type === "message" && entry.message.role !== "compactionSummary" && entry.message.role !== "branchSummary") {
+              ctx.sessionManager.appendMessage(entry.message);
+            } else if (entry.type === "custom_message") {
+              ctx.sessionManager.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
+            }
+          }
+          inheritedNativeCheckpoint = true;
+        }
+
         sourceTurnCount = userTurnCount(entries, leaf);
         sourceSnapshotAt = Date.now();
+        localCutoffAt = sourceSnapshotAt;
         updateSideStatus(ctx);
         sideStatusTimer = setInterval(() => updateSideStatus(ctx), 15_000);
       } catch (error) {
@@ -625,6 +651,9 @@ export default function herdrSideChat(pi: ExtensionAPI) {
             (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
           ),
         };
+      }
+      if (inheritedNativeCheckpoint) {
+        return { messages: filterSummaryArtifacts(event.messages) };
       }
       const localMessages = filterSummaryArtifacts(event.messages).filter(
         (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,

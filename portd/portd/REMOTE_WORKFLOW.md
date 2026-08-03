@@ -35,7 +35,10 @@ workspace is rooted at `~/Luca`, the parent of `luca-backend` and `luca-ims`.
 local listeners are always created on the Mac.
 
 The Herdr plugin refreshes discovery when panes start or exit. The standalone
-client remains available as `ports` on either machine.
+client remains available as `ports` on either machine. Press `1` for Ubuntu
+services exposed on Mac and `2` for Mac services exposed on Ubuntu. Reverse
+service choices are persistent; `43117` is the only automatic internal reverse
+because the remote client depends on it.
 
 ## Recovery
 

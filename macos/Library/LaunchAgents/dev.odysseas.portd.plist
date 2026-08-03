@@ -8,7 +8,7 @@
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>exec "$HOME/.local/bin/portd-launch" --host ubuntu --interval 2 --idle-interval 15 --max-backoff 300 --reverse-forward 19989:19989</string>
+    <string>exec "$HOME/.local/bin/portd-launch" --host ubuntu --interval 2 --idle-interval 15 --max-backoff 300</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

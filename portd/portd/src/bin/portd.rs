@@ -27,8 +27,8 @@ struct Args {
     #[arg(long, default_value_t = 10000, env = "PORTD_MAX_AUTO_PORT")]
     max_auto_port: u16,
 
-    /// Reverse forwards as REMOTE_PORT:LOCAL_PORT. Repeat the flag or use a
-    /// comma-separated PORTD_REVERSE_FORWARDS value.
+    /// Persistent reverse-forward seeds as UBUNTU_PORT:MAC_PORT. Repeat the
+    /// flag or use a comma-separated PORTD_REVERSE_FORWARDS value.
     #[arg(
         long = "reverse-forward",
         env = "PORTD_REVERSE_FORWARDS",

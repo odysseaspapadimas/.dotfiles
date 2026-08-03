@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PORTD_STATUS_URL=${PORTD_STATUS_URL:-http://127.0.0.1:43117/api/status}
+DEFAULT_REVERSE_PORTS=${REMOTE_ADB_REVERSE_PORTS:-"8081 8000"}
+
+usage() {
+  cat <<'EOF'
+Usage: remote-adb COMMAND [PORT ...]
+
+Commands:
+  doctor                 Check portd's ADB tunnel without starting a local server
+  devices                List devices from the Mac ADB server
+  use SERIAL             Print an ANDROID_SERIAL export for the current shell
+  status                 Show devices, selected device, and reverse mappings
+  reverse [PORT ...]     Apply device-to-Ubuntu mappings (default: 8081 8000)
+  reverse-list           List mappings on the selected device
+  reverse-remove [PORT]  Remove mappings by device port (default: 8081 8000)
+  reverse-remove-all     Remove every mapping from the selected device
+  recover [PORT ...]     Wait for the selected device and reapply mappings
+
+Set ANDROID_SERIAL to select a device. Set REMOTE_ADB_REVERSE_PORTS to a
+space- or comma-separated default list. Port targets are resolved through
+portd, so a device port can map to a different Mac-local port when necessary.
+EOF
+}
+
+portd_status() {
+  curl -fsS --max-time 3 "$PORTD_STATUS_URL"
+}
+
+require_tunnel() {
+  local status
+  if ! status=$(portd_status); then
+    echo "remote-adb: portd control channel is unavailable" >&2
+    echo "remote-adb: refusing to start an Ubuntu ADB server on port 5037" >&2
+    return 1
+  fi
+  if ! STATUS_JSON=$status python3 - <<'PY'
+import json, os, sys
+status = json.loads(os.environ["STATUS_JSON"])
+active = any(
+    item.get("remote_port") == 5037
+    and item.get("local_port") == 5037
+    and item.get("state") == "active"
+    for item in status.get("reverse_tunnels", [])
+)
+sys.exit(0 if status.get("connected") and active else 1)
+PY
+  then
+    echo "remote-adb: portd's Ubuntu 5037 -> Mac 5037 mapping is not active" >&2
+    echo "remote-adb: enable it in ports view 2; refusing to start a local server" >&2
+    return 1
+  fi
+}
+
+normalize_ports() {
+  local raw
+  if (($#)); then
+    raw="$*"
+  else
+    raw=$DEFAULT_REVERSE_PORTS
+  fi
+  raw=${raw//,/ }
+  local port
+  for port in $raw; do
+    if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1024 || port > 65535)); then
+      echo "remote-adb: invalid port: $port" >&2
+      return 1
+    fi
+    printf '%s\n' "$port"
+  done
+}
+
+select_device() {
+  if [[ -n ${ANDROID_SERIAL:-} ]]; then
+    export ANDROID_SERIAL
+    return
+  fi
+  local output
+  output=$(adb devices)
+  mapfile -t devices < <(awk 'NR > 1 && $2 == "device" { print $1 }' <<<"$output")
+  case ${#devices[@]} in
+    0)
+      echo "remote-adb: no authorized device is connected to the Mac ADB server" >&2
+      return 1
+      ;;
+    1)
+      export ANDROID_SERIAL=${devices[0]}
+      ;;
+    *)
+      echo "remote-adb: multiple devices are connected; set ANDROID_SERIAL" >&2
+      printf '  %s\n' "${devices[@]}" >&2
+      return 1
+      ;;
+  esac
+}
+
+resolve_mappings() {
+  local status ports
+  status=$(portd_status)
+  ports=$(normalize_ports "$@")
+  STATUS_JSON=$status PORTS=$ports python3 - <<'PY'
+import json, os, sys
+status = json.loads(os.environ["STATUS_JSON"])
+tunnels = {
+    item["remote_port"]: item.get("local_port")
+    for item in status.get("tunnels", [])
+    if item.get("state") == "active" and item.get("local_port") is not None
+}
+missing = []
+for value in os.environ["PORTS"].split():
+    device_port = int(value)
+    mac_port = tunnels.get(device_port)
+    if mac_port is None:
+        missing.append(device_port)
+    else:
+        print(f"{device_port} {mac_port}")
+if missing:
+    print(
+        "remote-adb: no active Mac-to-Ubuntu portd mapping for: "
+        + ", ".join(map(str, missing)),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+}
+
+apply_reverse() {
+  local mappings device_port mac_port
+  mappings=$(resolve_mappings "$@") || return
+  while read -r device_port mac_port; do
+    adb reverse "tcp:$device_port" "tcp:$mac_port" >/dev/null
+    printf 'device localhost:%s -> Mac localhost:%s -> Ubuntu localhost:%s\n' \
+      "$device_port" "$mac_port" "$device_port"
+  done <<<"$mappings"
+}
+
+command=${1:-}
+if [[ -z $command ]]; then
+  usage
+  exit 2
+fi
+shift
+
+case $command in
+  doctor)
+    require_tunnel
+    echo "portd: Ubuntu 127.0.0.1:5037 -> Mac 127.0.0.1:5037 is active"
+    adb devices -l
+    ;;
+  devices)
+    require_tunnel
+    adb devices -l
+    ;;
+  use)
+    [[ $# == 1 ]] || { echo "remote-adb: use requires one serial" >&2; exit 2; }
+    printf 'export ANDROID_SERIAL=%q\n' "$1"
+    ;;
+  status)
+    require_tunnel
+    adb devices -l
+    if select_device 2>/dev/null; then
+      printf 'selected: %s\n' "$ANDROID_SERIAL"
+      adb reverse --list
+    else
+      echo "selected: none"
+    fi
+    ;;
+  reverse)
+    require_tunnel
+    select_device
+    apply_reverse "$@"
+    ;;
+  reverse-list)
+    require_tunnel
+    select_device
+    adb reverse --list
+    ;;
+  reverse-remove)
+    require_tunnel
+    select_device
+    ports=$(normalize_ports "$@")
+    while read -r port; do
+      adb reverse --remove "tcp:$port"
+    done <<<"$ports"
+    ;;
+  reverse-remove-all)
+    require_tunnel
+    select_device
+    adb reverse --remove-all
+    ;;
+  recover)
+    require_tunnel
+    if [[ -z ${ANDROID_SERIAL:-} ]]; then
+      adb wait-for-device
+    fi
+    select_device
+    adb wait-for-device
+    apply_reverse "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "remote-adb: unknown command: $command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
