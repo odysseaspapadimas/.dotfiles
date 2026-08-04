@@ -1,5 +1,18 @@
 # Herdr configuration
 
+## Pi integration patch
+
+The tracked Herdr Pi integration adds `rpiv:ask-user:blocked` support so RPIV's
+questionnaire appears as **Needs input** in Herdr. Reapply the patch after
+`herdr integration install pi` or an integration update:
+
+```bash
+herdr-patch-pi-integration
+```
+
+The script is idempotent and refuses to modify an integration whose blocked-event
+layout it does not recognize.
+
 ## Popup commands
 
 Herdr servers intentionally run with a minimal `PATH`, and popup terminals do not inherit `HERDR_SESSION` or `HERDR_SOCKET_PATH`. Commands installed in `~/.local/bin` may therefore fail with status 127, while commands that invoke the Herdr CLI may accidentally query the default session.
@@ -23,6 +36,10 @@ The wrapper:
 - keeps failures visible instead of silently closing the popup.
 
 Use this wrapper for future local popup binaries. System commands that neither live in a user path nor call Herdr do not require it.
+
+## Project scratch
+
+`prefix+p` opens the standalone `project-scratch` editor for the current Git root (or cwd outside Git). Notes are private state under `${XDG_STATE_HOME:-~/.local/state}/herdr/project-scratch/` and are available from any pane without Pi. Existing notes from Pi's former scratch extension are copied forward on first use. `F2` previews and promotes the selection or complete scratch to `.agents/project-journal.md`; `F8` clears after confirmation.
 
 ## Workspace editor
 

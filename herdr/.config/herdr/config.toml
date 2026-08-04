@@ -73,6 +73,14 @@ height = "82%"
 description = "project scripts"
 
 [[keys.command]]
+key = "prefix+p"
+type = "popup"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" project-scratch"
+width = "90%"
+height = "90%"
+description = "private project scratch"
+
+[[keys.command]]
 key = "prefix+f"
 type = "shell"
 command = "/bin/sh \"$HOME/.config/herdr/popup-env\" workspace-editor"

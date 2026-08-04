@@ -1,6 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hasUnhandedWork, sideStatusLabel } from "../herdr-side-chat.ts";
+import {
+  hasUnhandedWork,
+  sideChatBoundaryMessage,
+  sideChatContextNotice,
+  sideStatusLabel,
+} from "../herdr-side-chat.ts";
+
+test("side-chat context identifies the boundary and shared working directory", () => {
+  const snapshotAt = Date.parse("2026-08-04T12:00:00.000Z");
+  const notice = sideChatContextNotice("leaf-123", snapshotAt);
+  const boundary = sideChatBoundaryMessage("leaf-123", snapshotAt);
+
+  assert.match(notice, /ephemeral side chat/);
+  assert.match(notice, /leaf leaf-123 at 2026-08-04T12:00:00.000Z/);
+  assert.match(notice, /working directory is shared/);
+  assert.match(notice, /Treat current file contents as authoritative/);
+  assert.match(notice, /Never revert, overwrite, or restore/);
+  assert.match(notice, /may inspect and modify files/);
+  assert.match(boundary, /local side-chat conversation starts here/);
+  assert.match(boundary, /snapshot leaf: leaf-123/i);
+});
 
 test("side status reports current and stale inherited context", () => {
   assert.equal(

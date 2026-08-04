@@ -154,6 +154,24 @@ export function hasUnhandedWork(localCount: number, handedOffLocalCount: number)
   return localCount > handedOffLocalCount;
 }
 
+export function sideChatContextNotice(sourceLeaf: string | undefined, snapshotAt: number): string {
+  return `## Side-chat environment
+
+You are operating in an ephemeral side chat forked from a main Pi conversation.
+
+- The conversation context before the side-chat boundary is inherited historical context from the main conversation. It is not side-local work.
+- The side chat began at source session leaf ${sourceLeaf ?? "(unknown)"} at ${new Date(snapshotAt).toISOString()}.
+- The working directory is shared with the main chat. Files may have changed since the inherited snapshot, including changes made concurrently by the main chat.
+- You may inspect and modify files when the user asks. Do not default to discussion-only behavior merely because this is a side chat.
+- Treat current file contents as authoritative. Do not assume differences between inherited context and the current filesystem are mistakes.
+- Never revert, overwrite, or restore current filesystem changes merely because they do not match the inherited conversation. Preserve unrelated changes.
+- When reasoning about the conversation, distinguish inherited main-chat context from turns made locally in this side chat.`;
+}
+
+export function sideChatBoundaryMessage(sourceLeaf: string | undefined, snapshotAt: number): string {
+  return `[Side-chat boundary: local side-chat conversation starts here. Main-session snapshot leaf: ${sourceLeaf ?? "unknown"}. Snapshot time: ${new Date(snapshotAt).toISOString()}. The working directory is shared and its current contents may be newer than the inherited context.]`;
+}
+
 export function sideStatusLabel(
   behind: number,
   localCount: number,
@@ -642,6 +660,12 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       }
     });
 
+    pi.on("before_agent_start", (event) => {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${sideChatContextNotice(sourceLeaf, sourceSnapshotAt)}`,
+      };
+    });
+
     pi.on("context", (event) => {
       if (pendingSummary) {
         // Summaries see only the side-local branch. Previous synthetic summary turns
@@ -652,14 +676,23 @@ export default function herdrSideChat(pi: ExtensionAPI) {
           ),
         };
       }
+      const boundary = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: sideChatBoundaryMessage(sourceLeaf, sourceSnapshotAt) }],
+        timestamp: localCutoffAt,
+      };
       if (inheritedNativeCheckpoint) {
-        return { messages: filterSummaryArtifacts(event.messages) };
+        const messages = filterSummaryArtifacts(event.messages);
+        const firstLocal = messages.findIndex(
+          (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
+        );
+        if (firstLocal < 0) return { messages: [...messages, boundary] };
+        return { messages: [...messages.slice(0, firstLocal), boundary, ...messages.slice(firstLocal)] };
       }
       const localMessages = filterSummaryArtifacts(event.messages).filter(
         (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
       );
-      if (inheritedMessages.length === 0) return { messages: localMessages };
-      return { messages: [...inheritedMessages, ...localMessages] };
+      return { messages: [...inheritedMessages, boundary, ...localMessages] };
     });
 
     pi.on("agent_settled", async (_event, ctx) => {
