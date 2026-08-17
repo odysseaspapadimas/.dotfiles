@@ -11,6 +11,8 @@ Mac-side services for remote Herdr development.
   running.
 - `browser-control-launch` applies the temporary unpacked-extension compatibility
   patch and starts the relay.
+- `wake-ubuntu` sends a Wake-on-LAN packet through the router's UDP port 9
+  forward and waits for the workstation to appear on Tailscale.
 
 The launch agents invoke wrappers through `$HOME`; they do not contain a fixed
 macOS username.
@@ -55,10 +57,19 @@ launchctl list | grep -E 'portd|browser-control'
 curl -fsS http://127.0.0.1:43117/api/status | jq
 ports  # press 1/2 or tab to switch forwarding direction
 browser-control status
+wake-ubuntu                 # wake and wait up to 3 minutes
+wake-ubuntu status          # only check Tailscale availability
+wake-ubuntu --timeout 300   # use a longer startup timeout
 
 tail -f ~/.local/state/portd/portd.log
 tail -f ~/.local/state/browser-control.log
 ```
+
+`wake-ubuntu` defaults to the workstation's current public IPv4 address, UDP
+port 9, Ethernet MAC address, and Tailscale DNS name. If the public address
+changes, set `WAKE_HOST` to the new address (or preferably a dynamic-DNS name).
+The target already has NetworkManager Wake-on-LAN set to `magic`; Wake-on-LAN
+must also remain enabled in its firmware and the router's UDP forward.
 
 The unpacked-extension patch is intentionally strict. If an npm update changes
 the relevant Browser Control code, the launch agent fails rather than modifying

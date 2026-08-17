@@ -1,0 +1,144 @@
+#!/bin/sh
+
+set -u
+
+# These defaults identify the Ubuntu workstation. Override any of them with an
+# environment variable if the public IP or network setup changes.
+WAKE_HOST=${WAKE_HOST:-94.131.134.146}
+WAKE_PORT=${WAKE_PORT:-9}
+WAKE_MAC=${WAKE_MAC:-74:56:3c:6f:bb:22}
+WAKE_TAILSCALE_TARGET=${WAKE_TAILSCALE_TARGET:-ubuntu.tail419972.ts.net}
+WAKE_TIMEOUT=${WAKE_TIMEOUT:-180}
+
+usage() {
+    cat <<'EOF'
+Usage: wake-ubuntu [status] [--timeout SECONDS]
+
+Send a Wake-on-LAN packet to the Ubuntu workstation and wait for it to
+appear on Tailscale. "status" only checks whether it is currently online.
+
+Environment overrides:
+  WAKE_HOST              Public hostname or IPv4 address
+  WAKE_PORT              Forwarded UDP port (default: 9)
+  WAKE_MAC               Workstation Ethernet MAC address
+  WAKE_TAILSCALE_TARGET  Tailscale hostname or IP used for validation
+  WAKE_TIMEOUT           Maximum seconds to wait (default: 180)
+  TAILSCALE_BIN           Path to the Tailscale CLI
+EOF
+}
+
+find_tailscale() {
+    if [ -n "${TAILSCALE_BIN:-}" ]; then
+        printf '%s\n' "$TAILSCALE_BIN"
+    elif command -v tailscale >/dev/null 2>&1; then
+        command -v tailscale
+    elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+        printf '%s\n' /Applications/Tailscale.app/Contents/MacOS/Tailscale
+    else
+        return 1
+    fi
+}
+
+is_online() {
+    "$tailscale_bin" ping \
+        --c 1 \
+        --timeout 2s \
+        --until-direct=false \
+        "$WAKE_TAILSCALE_TARGET" >/dev/null 2>&1
+}
+
+mode=wake
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        status)
+            mode=status
+            shift
+            ;;
+        --timeout)
+            [ "$#" -ge 2 ] || { echo "wake-ubuntu: --timeout needs a value" >&2; exit 2; }
+            WAKE_TIMEOUT=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "wake-ubuntu: unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$WAKE_TIMEOUT" in
+    ''|*[!0-9]*)
+        echo "wake-ubuntu: timeout must be a non-negative integer" >&2
+        exit 2
+        ;;
+esac
+
+tailscale_bin=$(find_tailscale) || {
+    echo "wake-ubuntu: Tailscale CLI not found" >&2
+    echo "Install its CLI integration or set TAILSCALE_BIN." >&2
+    exit 2
+}
+
+if [ "$mode" = status ]; then
+    if is_online; then
+        echo "Ubuntu is online on Tailscale."
+        exit 0
+    fi
+    echo "Ubuntu is offline on Tailscale."
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "wake-ubuntu: python3 is required to send the magic packet" >&2
+    exit 2
+fi
+
+python3 - "$WAKE_MAC" "$WAKE_HOST" "$WAKE_PORT" <<'PY'
+import socket
+import sys
+import time
+
+mac_text, host, port_text = sys.argv[1:]
+try:
+    mac = bytes.fromhex(mac_text.replace(":", "").replace("-", ""))
+    port = int(port_text)
+except ValueError as error:
+    raise SystemExit(f"wake-ubuntu: invalid wake configuration: {error}")
+
+if len(mac) != 6:
+    raise SystemExit("wake-ubuntu: WAKE_MAC must contain exactly 6 bytes")
+if not 1 <= port <= 65535:
+    raise SystemExit("wake-ubuntu: WAKE_PORT must be between 1 and 65535")
+
+packet = b"\xff" * 6 + mac * 16
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    for _ in range(3):
+        sock.sendto(packet, (host, port))
+        time.sleep(0.2)
+PY
+
+printf 'Sent Wake-on-LAN packet to %s:%s.\n' "$WAKE_HOST" "$WAKE_PORT"
+printf 'Waiting up to %s seconds for %s on Tailscale' "$WAKE_TIMEOUT" "$WAKE_TAILSCALE_TARGET"
+
+started=$(date +%s)
+while :; do
+    if is_online; then
+        printf '\nUbuntu is online on Tailscale.\n'
+        exit 0
+    fi
+
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$WAKE_TIMEOUT" ]; then
+        printf '\nTimed out waiting for Ubuntu to come online.\n' >&2
+        exit 1
+    fi
+
+    printf '.'
+    sleep 3
+done

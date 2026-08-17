@@ -17,7 +17,7 @@ prefix = "ctrl+space"
 
 [ui]
 mobile_width_threshold = 80
-agent_panel_sort = "spaces"
+agent_panel_sort = "priority"
 show_agent_labels_on_pane_borders = false
 sidebar_width = 30
 sidebar_min_width = 22
