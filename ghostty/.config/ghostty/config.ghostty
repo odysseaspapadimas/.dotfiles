@@ -1,0 +1,33 @@
+# Ported from ~/.config/kitty/kitty.conf
+
+# Typeface and exact Catppuccin Mocha palette from the Kitty config
+font-family = MesloLGS NF
+theme = Kitty Catppuccin Mocha
+
+# Transparency and compositor blur
+background-opacity = 0.85
+background-blur = true
+
+# Open new windows at a larger terminal-grid size
+window-width = 140
+window-height = 42
+
+# Match Kitty's immediate window-close behavior
+confirm-close-surface = false
+
+# Keep a compact tab bar visible at the bottom
+window-show-tab-bar = always
+window-theme = ghostty
+gtk-tabs-location = bottom
+gtk-toolbar-style = flat
+gtk-wide-tabs = false
+gtk-custom-css = catppuccin-mocha.css
+window-titlebar-background = #1E1E2E
+window-titlebar-foreground = #CDD6F4
+
+# Preserve the Ctrl+Arrow sequences used by the Kitty config.
+# The all: prefix mirrors Kitty's `send_text all` behavior for split panes.
+keybind = all:ctrl+arrow_up=csi:1;5A
+keybind = all:ctrl+arrow_down=csi:1;5B
+keybind = all:ctrl+arrow_right=csi:1;5C
+keybind = all:ctrl+arrow_left=csi:1;5D
