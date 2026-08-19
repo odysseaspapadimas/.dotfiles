@@ -9,17 +9,17 @@ right_format = "$username$hostname"
 
 [username]
 show_always = false
-format = "[󰖟 $user@](dimmed overlay0)"
+format = "[󰖟 $user@](bold teal)"
 
 [hostname]
 ssh_only = true
-format = "[$hostname](dimmed overlay0)"
+format = "[$hostname](bold sapphire)"
 
 [fill]
 symbol = " "
 
 [character]
-success_symbol = "[❯](bold lavender)"
+success_symbol = "[❯](bold mauve)"
 error_symbol = "[❯](bold red)"
 
 [directory]
@@ -38,7 +38,7 @@ truncation_symbol = "…"
 
 [git_status]
 format = "[($all_status$ahead_behind)]($style)"
-style = "sapphire"
+style = "bold peach"
 conflicted = "!${count} "
 ahead = "⇡${count} "
 behind = "⇣${count} "
@@ -52,7 +52,7 @@ deleted = "✘${count} "
 
 [cmd_duration]
 min_time = 2000
-format = "[󱎫 $duration](dimmed overlay0)"
+format = "[󱎫 $duration](yellow)"
 
 [palettes.catppuccin_mocha]
 rosewater = "#f5e0dc"
