@@ -14,7 +14,7 @@ stow -t ~ pi herdr hunk portd nvim ghostty kitty shell
 ## Packages
 
 - `shell` — shared Fish configuration and the `dot` synchronization command.
-- `pi` — Pi settings, keybindings, themes, and locally maintained extensions.
+- `pi` — Pi settings, keybindings, themes, skills, and locally maintained extensions. Use `/skills` to set dotfiles-managed skills as automatic or manual-only through native skill frontmatter.
 - `nvim` — native-package Neovim workspace configuration used by the standalone Herdr editor.
 - `ghostty` — Ghostty terminal settings and Catppuccin Mocha theme.
 - `kitty` — Kitty terminal settings and Catppuccin Mocha theme.
