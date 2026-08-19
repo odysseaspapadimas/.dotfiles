@@ -885,7 +885,7 @@ async fn api_open(State(state): State<AppState>, Path(port): Path<u16>) -> Respo
     else {
         return (StatusCode::NOT_FOUND, "port is not forwarded").into_response();
     };
-    let url = format!("http://127.0.0.1:{local_port}");
+    let url = format!("http://localhost:{local_port}");
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
