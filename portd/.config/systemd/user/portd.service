@@ -1,0 +1,14 @@
+[Unit]
+Description=Automatic SSH development-port forwarding
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/portd --host ubuntu
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
