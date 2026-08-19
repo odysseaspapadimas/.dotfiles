@@ -18,3 +18,8 @@ __pycache__/
 **/mcp-cache.json
 **/models-store.json
 **/skill-toggle.json
+
+# Never track generated Herdr runtime state
+herdr/.config/herdr/.plugins.lock
+herdr/.config/herdr/*.log
+herdr/.config/herdr/session.json

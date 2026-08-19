@@ -11,6 +11,32 @@ import {
 } from "@earendil-works/pi-ai";
 
 const STATE_ENTRY_TYPE = "codex-fast-mode-state-v1";
+const CODEX_ORIGINATOR = "codex_cli_rs";
+const WEBSOCKET_PATCH_KEY = Symbol.for("codex-fast-mode.websocket-patch");
+type WebSocketPatchState = { enabled: boolean; installed: boolean };
+
+function installWebSocketOriginatorPatch(): WebSocketPatchState {
+	const globals = globalThis as typeof globalThis & { [WEBSOCKET_PATCH_KEY]?: WebSocketPatchState };
+	const state = globals[WEBSOCKET_PATCH_KEY] ??= { enabled: false, installed: false };
+	if (state.installed || typeof globalThis.WebSocket !== "function") return state;
+
+	const NativeWebSocket = globalThis.WebSocket;
+	globalThis.WebSocket = new Proxy(NativeWebSocket, {
+		construct(target, args, newTarget) {
+			const [url, options, ...rest] = args;
+			if (state.enabled && options && typeof options === "object" && !Array.isArray(options)) {
+				const candidate = options as { headers?: HeadersInit };
+				const headers = new Headers(candidate.headers);
+				headers.set("originator", CODEX_ORIGINATOR);
+				args = [url, { ...options, headers }, ...rest];
+			}
+			return Reflect.construct(target, args, newTarget);
+		},
+	}) as typeof WebSocket;
+	state.installed = true;
+	return state;
+}
+
 // Built-in footer sorts extension statuses by key. The zz- prefix keeps this last.
 const STATUS_KEY = "zz-codex-fast-mode";
 
@@ -75,6 +101,7 @@ function nativeFastOptions(
 
 export default function codexFastMode(pi: ExtensionAPI) {
 	let enabled = false;
+	const websocketPatch = installWebSocketOriginatorPatch();
 
 	const updateStatus = (ctx: Pick<ExtensionContext, "model" | "ui">) => {
 		const text = enabled && supportsFastMode(ctx.model)
@@ -99,6 +126,7 @@ export default function codexFastMode(pi: ExtensionAPI) {
 
 	const restoreState = (ctx: ExtensionContext) => {
 		enabled = restoreFastMode(ctx.sessionManager.getBranch());
+		websocketPatch.enabled = enabled;
 		updateStatus(ctx);
 	};
 
@@ -128,6 +156,7 @@ export default function codexFastMode(pi: ExtensionAPI) {
 			}
 
 			enabled = action === "on" || (action === "" && !enabled);
+			websocketPatch.enabled = enabled;
 			pi.appendEntry(STATE_ENTRY_TYPE, { enabled });
 			updateStatus(ctx);
 			ctx.ui.notify(`Codex Fast Mode ${enabled ? "enabled" : "disabled"}.`, enabled ? "warning" : "info");

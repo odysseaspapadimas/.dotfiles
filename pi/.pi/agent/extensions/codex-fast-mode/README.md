@@ -1,7 +1,8 @@
 # Codex Fast Mode
 
-A small Pi extension that enables OpenAI Codex Fast Mode through Pi's native
-`serviceTier: "priority"` support.
+A small Pi extension that enables OpenAI Codex Fast Mode by combining Pi's
+native `serviceTier: "priority"` support with the Codex WebSocket originator
+identifier (`originator: "codex_cli_rs"`) required by the ChatGPT OAuth backend.
 
 ## Usage
 
