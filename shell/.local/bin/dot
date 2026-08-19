@@ -18,7 +18,7 @@ fi
 install_cli_dependencies() {
   local required=(fish starship zoxide eza bat stow git)
   local missing=()
-  local command
+  local command cargo_package
 
   for command in "${required[@]}"; do
     if [[ $command == bat ]] && command -v batcat >/dev/null 2>&1; then
@@ -27,19 +27,28 @@ install_cli_dependencies() {
     command -v "$command" >/dev/null 2>&1 || missing+=("$command")
   done
 
-  ((${#missing[@]})) || return 0
-  echo "dot: installing missing CLI tools: ${missing[*]}"
-
   if command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --needed --noconfirm "${missing[@]}"
+    cargo_package=rust
   elif command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+    cargo_package=cargo
   elif command -v brew >/dev/null 2>&1; then
-    brew install "${missing[@]}"
+    cargo_package=rust
   else
-    echo "dot: unsupported package manager; install ${missing[*]} manually" >&2
+    echo "dot: unsupported package manager" >&2
     return 1
+  fi
+  command -v cargo >/dev/null 2>&1 || missing+=("$cargo_package")
+
+  if ((${#missing[@]})); then
+    echo "dot: installing missing CLI tools: ${missing[*]}"
+    if command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --needed --noconfirm "${missing[@]}"
+    elif command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+    else
+      brew install "${missing[@]}"
+    fi
   fi
 
   # Older Debian/Ubuntu releases expose bat as batcat.
@@ -47,6 +56,37 @@ install_cli_dependencies() {
     mkdir -p "$HOME/.local/bin"
     ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"
   fi
+}
+
+install_rust_tools() {
+  local project=$1
+  shift
+  local manifest="$project/Cargo.toml"
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles-build/$(basename "$project")"
+  local binary rebuild=false
+
+  for binary in "$@"; do
+    if [[ ! -x "$HOME/.local/bin/$binary" || -L "$HOME/.local/bin/$binary" ]] ||
+       find "$project/src" "$manifest" "$project/Cargo.lock" -newer "$HOME/.local/bin/$binary" -print -quit 2>/dev/null | grep -q .; then
+      rebuild=true
+      break
+    fi
+  done
+  [[ $rebuild == true ]] || return 0
+
+  echo "dot: building $(basename "$project")"
+  CARGO_TARGET_DIR="$cache" cargo build --release --locked --manifest-path "$manifest"
+  mkdir -p "$HOME/.local/bin"
+  for binary in "$@"; do
+    rm -f "$HOME/.local/bin/$binary"
+    install -m 755 "$cache/release/$binary" "$HOME/.local/bin/$binary"
+  done
+}
+
+install_dotfile_tools() {
+  install_rust_tools "$repo/portd/portd" portd ports
+  install_rust_tools "$repo/herdr/project-scratch" project-scratch
+  install_rust_tools "$repo/herdr/project-scripts" project-scripts
 }
 
 ensure_fish_login_shell() {
@@ -72,6 +112,7 @@ if [[ $stow_only == false ]]; then
   echo "dot: pulling $repo"
   git -C "$repo" pull --ff-only
   install_cli_dependencies
+  install_dotfile_tools
   ensure_fish_login_shell
 fi
 

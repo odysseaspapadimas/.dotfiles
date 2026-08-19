@@ -1,8 +1,8 @@
-# Mac and Ubuntu workflow
+# Local client and Ubuntu workflow
 
 ## Daily entry point
 
-Open Ghostty. Its first surface runs:
+From the Omarchy or macOS client, attach with:
 
 ```sh
 herdr --remote ubuntu --session work --remote-keybindings server
@@ -30,21 +30,23 @@ workspace is rooted at `~/Luca`, the parent of `luca-backend` and `luca-ims`.
 
 ## Ports
 
-`portd` runs on the Mac and maintains one SSH control connection. The Ubuntu
-`ports` client reaches it through a reverse control channel, so browser opens and
-local listeners are always created on the Mac.
+`portd` runs on the local client and maintains one SSH control connection over
+the `ubuntu` SSH alias. The Ubuntu `ports` client reaches it through a reverse
+control channel, so browser opens and local listeners are created on the client.
+On Omarchy it runs as `portd.service`; macOS uses its launch agent.
 
 The Herdr plugin refreshes discovery when panes start or exit. The standalone
 client remains available as `ports` on either machine. Press `1` for Ubuntu
-services exposed on Mac and `2` for Mac services exposed on Ubuntu. Reverse
-service choices are persistent; `43117` is the only automatic internal reverse
-because the remote client depends on it.
+services exposed on the client and `2` for client services exposed on Ubuntu.
+Reverse service choices are persistent; `43117` is the only automatic internal
+reverse because the remote client depends on it.
 
 ## Recovery
 
 ```sh
-# Mac forwarding status
+# Local forwarding status
 curl -fsS http://127.0.0.1:43117/api/status | jq
+systemctl --user status portd.service  # Omarchy
 
 # Ubuntu Herdr status
 ssh ubuntu 'systemctl --user status herdr-work'

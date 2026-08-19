@@ -21,8 +21,10 @@ Changes autosave after 750 ms. Writes use same-directory temporary files and ato
 
 ## Build
 
+Run `dot` from anywhere to rebuild and install the binary when its source changes.
+For development:
+
 ```bash
 cargo test
 cargo build --release
-ln -sf "$PWD/target/release/project-scratch" ~/.local/bin/project-scratch
 ```

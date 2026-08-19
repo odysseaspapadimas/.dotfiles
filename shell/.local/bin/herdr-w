@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+exec herdr \
+  --remote ubuntu \
+  --remote-keybindings server \
+  --session work \
+  "$@"

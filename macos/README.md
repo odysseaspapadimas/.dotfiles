@@ -20,7 +20,7 @@ macOS username.
 ## Install
 
 ```bash
-cd ~/dotfiles
+cd ~/.dotfiles
 stow -R -t ~ macos
 npm install --global @opencode-ai/browser-control@0.3.2
 
@@ -30,15 +30,11 @@ launchctl unload ~/Library/LaunchAgents/dev.odysseas.browser-control.plist 2>/de
 launchctl load -w ~/Library/LaunchAgents/dev.odysseas.browser-control.plist
 ```
 
-Build `~/portd`, then link its binaries before loading the portd agent:
+Run `dot` to build and install `portd` and `ports`, then link the macOS launch wrapper before loading the agent:
 
 ```bash
-cd ~/portd
-cargo build --release
-mkdir -p ~/.local/bin
-ln -sfn "$PWD/target/release/portd" ~/.local/bin/portd
-ln -sfn "$PWD/target/release/ports" ~/.local/bin/ports
-ln -sfn "$PWD/scripts/portd-launch" ~/.local/bin/portd-launch
+dot
+ln -sfn "$HOME/.dotfiles/portd/portd/scripts/portd-launch" ~/.local/bin/portd-launch
 ```
 
 Load the Browser Control extension unpacked in the dedicated **Pi** Chrome

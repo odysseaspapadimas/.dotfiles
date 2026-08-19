@@ -24,8 +24,10 @@ Standalone Ratatui package and Composer script runner for Herdr. It replaces the
 
 ## Build
 
+Run `dot` from anywhere to rebuild and install the binary when its source changes.
+For development:
+
 ```bash
 cargo test
 cargo build --release
-ln -sf "$PWD/target/release/project-scripts" ~/.local/bin/project-scripts
 ```

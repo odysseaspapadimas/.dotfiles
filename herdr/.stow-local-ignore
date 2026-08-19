@@ -1,0 +1,4 @@
+^/README.*
+^/project-scratch(/|$)
+^/project-scripts(/|$)
+^/tests(/|$)
