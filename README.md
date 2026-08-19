@@ -6,8 +6,8 @@ Personal configuration managed with [GNU Stow](https://www.gnu.org/software/stow
 
 ```bash
 sudo apt-get install stow
-git clone <your-repository-url> ~/dotfiles
-cd ~/dotfiles
+git clone <your-repository-url> ~/.dotfiles
+cd ~/.dotfiles
 stow -t ~ pi herdr hunk portd nvim ghostty kitty shell
 ```
 
@@ -28,7 +28,7 @@ Sensitive and generated Pi state is intentionally excluded, including OAuth cred
 ## Update links
 
 ```bash
-cd ~/dotfiles
+cd ~/.dotfiles
 dot
 
 # Restow without pulling (useful while editing locally):
