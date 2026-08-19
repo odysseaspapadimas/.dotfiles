@@ -886,7 +886,12 @@ async fn api_open(State(state): State<AppState>, Path(port): Path<u16>) -> Respo
         return (StatusCode::NOT_FOUND, "port is not forwarded").into_response();
     };
     let url = format!("http://127.0.0.1:{local_port}");
-    match Command::new("open").arg(&url).status().await {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    match Command::new(opener).arg(&url).status().await {
         Ok(status) if status.success() => StatusCode::NO_CONTENT.into_response(),
         Ok(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
