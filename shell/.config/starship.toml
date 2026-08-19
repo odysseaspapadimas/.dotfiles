@@ -5,6 +5,11 @@ palette = "catppuccin_mocha"
 format = """
 [  ](lavender)$directory[  ·  ](overlay0)$git_branch$git_status$fill$cmd_duration
 $character"""
+right_format = "$hostname"
+
+[hostname]
+ssh_only = true
+format = "[SSH](dimmed overlay0)"
 
 [fill]
 symbol = " "
