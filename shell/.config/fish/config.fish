@@ -1,14 +1,15 @@
-# Shared interactive Fish configuration.
+# Shared Fish configuration.
+
+# Keep personal commands available to interactive and SSH command shells.
+fish_add_path --prepend "$HOME/.local/bin"
+
+if test -d "$HOME/.local/share/omarchy"
+    set -gx OMARCHY_PATH "$HOME/.local/share/omarchy"
+    fish_add_path --prepend "$OMARCHY_PATH/bin"
+end
 
 if status is-interactive
     set -g fish_greeting
-
-    fish_add_path --prepend "$HOME/.local/bin"
-
-    if test -d "$HOME/.local/share/omarchy"
-        set -gx OMARCHY_PATH "$HOME/.local/share/omarchy"
-        fish_add_path --prepend "$OMARCHY_PATH/bin"
-    end
 
     if set -q EDITOR
         set -gx SUDO_EDITOR "$EDITOR"
