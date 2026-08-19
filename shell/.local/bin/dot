@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+packages=(pi herdr hunk portd nvim ghostty kitty shell)
+
+if [[ ${1:-} == "--stow-only" ]]; then
+  shift
+else
+  if [[ -n $(git -C "$repo" status --porcelain) ]]; then
+    echo "dot: $repo has uncommitted changes; commit or stash them first" >&2
+    exit 1
+  fi
+  echo "dot: pulling $repo"
+  git -C "$repo" pull --ff-only
+fi
+
+available=()
+for package in "${packages[@]}"; do
+  [[ -d "$repo/$package" ]] && available+=("$package")
+done
+
+echo "dot: restowing ${available[*]}"
+stow -R -d "$repo" -t "$HOME" "${available[@]}"
+echo "dot: synchronized"

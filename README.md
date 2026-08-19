@@ -8,11 +8,12 @@ Personal configuration managed with [GNU Stow](https://www.gnu.org/software/stow
 sudo apt-get install stow
 git clone <your-repository-url> ~/dotfiles
 cd ~/dotfiles
-stow -t ~ pi herdr hunk portd nvim ghostty kitty
+stow -t ~ pi herdr hunk portd nvim ghostty kitty shell
 ```
 
 ## Packages
 
+- `shell` — shared Fish configuration and the `dot` synchronization command.
 - `pi` — Pi settings, keybindings, themes, and locally maintained extensions.
 - `nvim` — native-package Neovim workspace configuration used by the standalone Herdr editor.
 - `ghostty` — Ghostty terminal settings and Catppuccin Mocha theme.
@@ -28,7 +29,10 @@ Sensitive and generated Pi state is intentionally excluded, including OAuth cred
 
 ```bash
 cd ~/dotfiles
-stow -R -t ~ pi herdr hunk portd nvim ghostty kitty
+dot
+
+# Restow without pulling (useful while editing locally):
+dot --stow-only
 
 # On the Mac:
 stow -R -t ~ macos
