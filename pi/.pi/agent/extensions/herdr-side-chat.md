@@ -19,6 +19,8 @@
 
 The side status reports whether inherited context is current, how many main turns it trails, local conversation size, and whether the latest local work has been handed off. Duplicate handoffs are blocked until another local turn is added.
 
+Side chats share the main Pi session store, so `pi_sessions` can discover and create normal sessions even though the side conversation itself remains ephemeral. Within a side chat, `main` and `parent` resolve to its source session.
+
 ## Ctrl+X shortcuts
 
 - `Ctrl+X b` — create/focus side chat

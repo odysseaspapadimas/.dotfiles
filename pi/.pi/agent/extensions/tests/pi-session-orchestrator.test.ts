@@ -6,13 +6,19 @@ import { dirname, join } from "node:path";
 async function main() {
 const root = await mkdtemp(join(tmpdir(), "pi-session-orchestrator-test-"));
 const agentDir = join(root, "agent");
-process.env.PI_CODING_AGENT_DIR = agentDir;
+const sideAgentDir = join(agentDir, "herdr-side-chat", "runtime");
+process.env.PI_CODING_AGENT_DIR = sideAgentDir;
+process.env.PI_HERDR_SIDE_SHARED_AGENT_DIR = agentDir;
 process.env.HERDR_ENV = "1";
 process.env.HERDR_WORKSPACE_ID = "w-test";
 process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS = "100";
 
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
-const { default: orchestrator } = await import("../pi-session-orchestrator.ts");
+const { default: orchestrator, sideSharedAgentDirectory } = await import("../pi-session-orchestrator.ts");
+
+assert.equal(sideSharedAgentDirectory(sideAgentDir, agentDir), agentDir);
+assert.equal(sideSharedAgentDirectory(sideAgentDir, undefined), agentDir);
+assert.equal(sideSharedAgentDirectory(agentDir, undefined), undefined);
 
 interface Pane {
   pane_id: string;
@@ -191,7 +197,7 @@ function execute(params: Record<string, unknown>, sessionManager?: InstanceType<
 
 try {
   // One-time compatibility migration: preserve a real legacy session and discard the index.
-  const legacy = SessionManager.create(root);
+  const legacy = SessionManager.create(root, join(agentDir, "sessions", "fixture-project"));
   legacy.appendSessionInfo("Legacy");
   const legacyPath = legacy.getSessionFile()!;
   await mkdir(dirname(legacyPath), { recursive: true });
@@ -208,7 +214,7 @@ try {
   assert.ok(SessionManager.open(legacyPath).getEntries().some((entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator"));
 
   // Ordinary Pi sessions are retained as historical records, then classified as discovered when active.
-  const external = SessionManager.create(root);
+  const external = SessionManager.create(root, join(agentDir, "sessions", "fixture-project"));
   external.appendSessionInfo("External review");
   const externalPath = external.getSessionFile()!;
   await mkdir(dirname(externalPath), { recursive: true });
@@ -282,6 +288,8 @@ try {
   const created = result.details.session;
   assert.match(created.id, /^dir_[0-9a-f]{32}$/);
   assert.equal(created.name, "Lifecycle");
+  assert.ok(created.sessionPath.startsWith(join(agentDir, "sessions")));
+  assert.equal(created.sessionPath.startsWith(join(sideAgentDir, "sessions")), false);
   assert.match(result.content[0].text, /Starting message sent/);
   const createdMetadata = SessionManager.open(created.sessionPath).getEntries().findLast(
     (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",

@@ -10,6 +10,8 @@ end
 
 if status is-interactive
     set -g fish_greeting
+    set -g fish_autosuggestion_enabled 1
+    set -g fish_color_autosuggestion 6c7086
 
     if set -q EDITOR
         set -gx SUDO_EDITOR "$EDITOR"

@@ -7,12 +7,34 @@ import {
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { mkdir, readFile, realpath, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile, readdir, realpath, rmdir, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 const TOOL_NAME = "pi_sessions";
 const METADATA_TYPE = "pi-session-orchestrator";
-const LEGACY_REGISTRY_PATH = join(getAgentDir(), "pi-session-orchestrator", "registry.json");
+
+export function sideSharedAgentDirectory(
+  agentDir: string,
+  configuredSharedAgentDir: string | undefined,
+): string | undefined {
+  if (configuredSharedAgentDir) return configuredSharedAgentDir;
+  const sideRoot = dirname(agentDir);
+  if (basename(agentDir) === "runtime" && basename(sideRoot) === "herdr-side-chat") {
+    return dirname(sideRoot);
+  }
+  return undefined;
+}
+
+// Herdr side chats use an isolated agent directory so their own ephemeral Pi
+// session never enters the normal resume picker. Session orchestration is
+// intentionally shared, though: workers and existing sessions belong to the
+// user's normal Pi store, not the side-chat runtime directory. Inferring the
+// known runtime layout keeps already-running side chats compatible as well.
+const AGENT_DIR = getAgentDir();
+const SIDE_SHARED_AGENT_DIR = sideSharedAgentDirectory(AGENT_DIR, process.env.PI_HERDR_SIDE_SHARED_AGENT_DIR);
+const SESSION_AGENT_DIR = SIDE_SHARED_AGENT_DIR ?? AGENT_DIR;
+const SESSION_ROOT = join(SESSION_AGENT_DIR, "sessions");
+const LEGACY_REGISTRY_PATH = join(SESSION_AGENT_DIR, "pi-session-orchestrator", "registry.json");
 const WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID;
 const SIDE_SOURCE_SESSION = process.env.PI_HERDR_SIDE_SOURCE;
 const SIDE_PARENT_PANE = process.env.PI_HERDR_SIDE_PARENT_PANE;
@@ -21,6 +43,12 @@ const PROMPT_ACCEPT_TIMEOUT_MS =
   Number.isFinite(configuredPromptTimeout) && configuredPromptTimeout > 0
     ? Math.max(100, configuredPromptTimeout)
     : 30_000;
+
+function sessionDirectory(cwd: string): string {
+  const resolvedCwd = resolve(cwd);
+  const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return join(SESSION_ROOT, safePath);
+}
 
 const SessionLifecycle = StringEnum(["persistent", "task"] as const);
 const ThinkingLevel = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
@@ -372,9 +400,23 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     return migrationPromise;
   }
 
+  async function discoverSessionInfos(): Promise<SessionInfo[]> {
+    if (!SIDE_SHARED_AGENT_DIR) return SessionManager.listAll();
+    try {
+      const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+      const directories = entries
+        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+        .map((entry) => join(SESSION_ROOT, entry.name));
+      return (await Promise.all(directories.map((directory) => SessionManager.listAll(directory)))).flat();
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
   async function discoverSessions(): Promise<ManagedSession[]> {
     await ensureMigrated();
-    const infos = await SessionManager.listAll();
+    const infos = await discoverSessionInfos();
     const byIdentity = new Map<string, ManagedSession>();
     for (const info of infos) {
       const session = managedFromInfo(info);
@@ -755,7 +797,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     await ensureMigrated();
 
     const cwd = resolve(params.cwd?.trim() || ctx.cwd);
-    const manager = SessionManager.create(cwd);
+    const manager = SessionManager.create(cwd, sessionDirectory(cwd));
     const sessionId = manager.getSessionId();
     const id = `dir_${sessionId.replace(/-/g, "")}`;
     const createdAt = Date.now();
