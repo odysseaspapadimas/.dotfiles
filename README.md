@@ -4,29 +4,15 @@ Shared CLI and development configuration for Omarchy, Ubuntu, and macOS, managed
 
 ## Bootstrap
 
-Install Git and Stow first:
+On a fresh Omarchy Quattro installation, run one command:
 
 ```bash
-# Ubuntu
-sudo apt-get install git stow
-
-# Omarchy / Arch
-sudo pacman -S --needed git stow
-
-# macOS
-brew install git stow
+git clone https://github.com/odysseaspapadimas/.dotfiles.git ~/.dotfiles && ~/.dotfiles/shell/.local/bin/dot
 ```
 
-Then clone and stow the shared packages:
+`dot` pulls with `--ff-only`, detects and offers to restore the encrypted Quattro migration archive from removable media, installs the personal CLI tools, installs Herdr and Something X, selects Pi as the default Omarchy agent, builds the repository's Rust helpers, sets Fish as the login shell, restows every package, and enables the Portd and Syncthing user services.
 
-```bash
-git clone https://github.com/odysseaspapadimas/.dotfiles.git ~/.dotfiles
-cd ~/.dotfiles
-stow -t ~ pi herdr hunk portd nvim ghostty kitty shell
-dot
-```
-
-`dot` pulls with `--ff-only`, installs missing CLI dependencies, builds the repository's Rust helper tools when needed, sets Fish as the login shell, and restows the shared packages. Rust build output is kept under `~/.cache/dotfiles-build`, not inside the repository.
+Rust build output is kept under `~/.cache/dotfiles-build`, not inside the repository. CLIamp is intentionally not reinstalled.
 
 ## Daily use
 
@@ -55,12 +41,6 @@ Embedded Rust source and tests are excluded from Stow, so they no longer create 
 Sensitive and generated state is excluded, including SSH keys, credentials, Pi sessions, package installs, build output, caches, Herdr sessions, and logs.
 
 ## Platform-specific setup
-
-On Omarchy, enable the port-forwarding service after the first `dot` run:
-
-```bash
-systemctl --user enable --now portd.service
-```
 
 On macOS:
 

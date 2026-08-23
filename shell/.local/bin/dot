@@ -16,45 +16,72 @@ if (($#)); then
 fi
 
 install_cli_dependencies() {
-  local required=(fish starship zoxide eza bat stow git)
   local missing=()
-  local command cargo_package
+  local command package
 
-  for command in "${required[@]}"; do
-    if [[ $command == bat ]] && command -v batcat >/dev/null 2>&1; then
-      continue
-    fi
-    command -v "$command" >/dev/null 2>&1 || missing+=("$command")
-  done
+  # command:Arch-package:Ubuntu-package:Homebrew-package
+  local tools=(
+    fish:fish:fish:fish
+    starship:starship:starship:starship
+    zoxide:zoxide:zoxide:zoxide
+    eza:eza:eza:eza
+    bat:bat:bat:bat
+    fzf:fzf:fzf:fzf
+    fd:fd:fd-find:fd
+    rg:ripgrep:ripgrep:ripgrep
+    nvim:neovim:neovim:neovim
+    kitty:kitty:kitty:kitty
+    stow:stow:stow:stow
+    git:git:git:git
+    cargo:rust:cargo:rust
+    syncthing:syncthing:syncthing:syncthing
+  )
 
+  local manager package_index
   if command -v pacman >/dev/null 2>&1; then
-    cargo_package=rust
+    manager=pacman package_index=1
   elif command -v apt-get >/dev/null 2>&1; then
-    cargo_package=cargo
+    manager=apt package_index=2
   elif command -v brew >/dev/null 2>&1; then
-    cargo_package=rust
+    manager=brew package_index=3
   else
     echo "dot: unsupported package manager" >&2
     return 1
   fi
-  command -v cargo >/dev/null 2>&1 || missing+=("$cargo_package")
+
+  for tool in "${tools[@]}"; do
+    IFS=: read -r command arch_package ubuntu_package brew_package <<<"$tool"
+    [[ $command == bat && $(command -v batcat 2>/dev/null) ]] && continue
+    [[ $command == fd && $(command -v fdfind 2>/dev/null) ]] && continue
+    command -v "$command" >/dev/null 2>&1 && continue
+    case $package_index in
+      1) package=$arch_package ;;
+      2) package=$ubuntu_package ;;
+      3) package=$brew_package ;;
+    esac
+    missing+=("$package")
+  done
 
   if ((${#missing[@]})); then
-    echo "dot: installing missing CLI tools: ${missing[*]}"
-    if command -v pacman >/dev/null 2>&1; then
-      sudo pacman -S --needed --noconfirm "${missing[@]}"
-    elif command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update -qq
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
-    else
-      brew install "${missing[@]}"
-    fi
+    echo "dot: installing ${missing[*]}"
+    case $manager in
+      pacman) sudo pacman -S --needed --noconfirm "${missing[@]}" ;;
+      apt)
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+        ;;
+      brew) brew install "${missing[@]}" ;;
+    esac
   fi
 
-  # Older Debian/Ubuntu releases expose bat as batcat.
+  # Debian and Ubuntu use different binary names for these packages.
   if ! command -v bat >/dev/null 2>&1 && command -v batcat >/dev/null 2>&1; then
     mkdir -p "$HOME/.local/bin"
     ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"
+  fi
+  if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"
   fi
 }
 
@@ -89,6 +116,56 @@ install_dotfile_tools() {
   install_rust_tools "$repo/herdr/project-scripts" project-scripts
 }
 
+install_personal_tools() {
+  if ! command -v herdr >/dev/null 2>&1; then
+    echo "dot: installing Herdr"
+    curl -fsSL https://herdr.dev/install.sh | sh
+  fi
+
+  # Quattro owns the Pi launcher and installs Pi on first use.
+  if command -v omarchy >/dev/null 2>&1 && ! command -v pi >/dev/null 2>&1; then
+    echo "dot: selecting Pi as the default agent"
+    omarchy default agent pi
+  fi
+
+  if command -v omarchy >/dev/null 2>&1 && ! command -v something-x >/dev/null 2>&1; then
+    echo "dot: installing Something X"
+    omarchy pkg aur add something-x
+  fi
+}
+
+restore_migration_backup() {
+  [[ -e "$HOME/.pi/agent/auth.json" ]] && return 0
+
+  local archive candidate answer password
+  for candidate in \
+    "/run/media/$USER"/*/quattro-migration.tar.zst.enc \
+    "/media/$USER"/*/quattro-migration.tar.zst.enc \
+    /mnt/*/quattro-migration.tar.zst.enc; do
+    [[ -f $candidate ]] && { archive=$candidate; break; }
+  done
+  [[ -n ${archive:-} ]] || return 0
+
+  printf 'dot: found migration backup at %s\n' "$archive"
+  read -rp 'dot: restore SSH, Pi sessions, and personal state? [Y/n] ' answer
+  [[ ${answer:-y} =~ ^[Yy]$ ]] || return 0
+  read -rsp 'Archive password: ' password
+  printf '\n'
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 -in "$archive" -pass fd:3 3<<<"$password" \
+    | tar --zstd -xf - -C "$HOME"
+  unset password
+  chmod 700 "$HOME/.ssh" 2>/dev/null || true
+  find "$HOME/.ssh" -type f -exec chmod go-rwx {} + 2>/dev/null || true
+  echo "dot: migration state restored"
+}
+
+enable_services() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user daemon-reload
+  systemctl --user enable --now portd.service
+  systemctl --user enable --now syncthing.service
+}
+
 ensure_fish_login_shell() {
   local fish_path current_shell
   fish_path="$(command -v fish)"
@@ -111,7 +188,9 @@ if [[ $stow_only == false ]]; then
   fi
   echo "dot: pulling $repo"
   git -C "$repo" pull --ff-only
+  restore_migration_backup
   install_cli_dependencies
+  install_personal_tools
   install_dotfile_tools
   ensure_fish_login_shell
 fi
@@ -122,5 +201,10 @@ for package in "${packages[@]}"; do
 done
 
 echo "dot: restowing ${available[*]}"
-stow -R -d "$repo" -t "$HOME" "${available[@]}"
+# Quattro ships its own defaults at many of these paths. Adopt only the files
+# represented by our Stow packages, then restore our committed versions through
+# the resulting links. Unrelated Quattro configuration remains untouched.
+stow --adopt -R -d "$repo" -t "$HOME" "${available[@]}"
+git -C "$repo" restore --worktree -- "${available[@]}"
+[[ $stow_only == true ]] || enable_services
 echo "dot: synchronized"
