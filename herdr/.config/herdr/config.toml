@@ -12,10 +12,25 @@ green = "#a6da95"
 red = "#ed8796"
 yellow = "#eed49f"
 
+[terminal]
+new_cwd = "follow"
+
 [keys]
 prefix = "ctrl+space"
+previous_tab = "prefix+p"
 
 [ui]
+accent = "blue"
+pane_gaps = true
+pane_outer_borders = true
+pane_scrollbars = false
+confirm_close = false
+prompt_new_tab_name = false
+mouse_capture = true
+tab_bar_right = [{ type = "zoom" }, { type = "hostname" }]
+window_title = "{hostname}: {workspace}"
+
+# Custom agent-sidebar settings.
 mobile_width_threshold = 80
 agent_panel_sort = "priority"
 show_agent_labels_on_pane_borders = false
@@ -75,7 +90,7 @@ height = "82%"
 description = "project scripts"
 
 [[keys.command]]
-key = "prefix+p"
+key = "prefix+shift+s"
 type = "popup"
 command = "/bin/sh \"$HOME/.config/herdr/popup-env\" project-scratch"
 width = "90%"

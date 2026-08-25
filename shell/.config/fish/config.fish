@@ -3,7 +3,13 @@
 # Keep personal commands available to interactive and SSH command shells.
 fish_add_path --prepend "$HOME/.local/bin"
 
-if test -d "$HOME/.local/share/omarchy"
+# Use the installed Omarchy package for the live desktop. The source checkout
+# under ~/.local/share/omarchy is kept for Omarchy Mac updates/development, but
+# must not override the packaged CLI unless `omarchy dev link` is active.
+if test -d /usr/share/omarchy
+    set -gx OMARCHY_PATH /usr/share/omarchy
+    fish_add_path --prepend "$OMARCHY_PATH/bin"
+else if test -d "$HOME/.local/share/omarchy"
     set -gx OMARCHY_PATH "$HOME/.local/share/omarchy"
     fish_add_path --prepend "$OMARCHY_PATH/bin"
 end

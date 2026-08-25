@@ -1,0 +1,3 @@
+# This file contains fish universal variable definitions.
+# VERSION: 3.0
+SETUVAR fish_user_paths:/usr/share/omarchy/bin\x1e/home/odysseas/\x2elocal/bin
