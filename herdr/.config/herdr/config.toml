@@ -32,7 +32,7 @@ window_title = "{hostname}: {workspace}"
 
 # Custom agent-sidebar settings.
 mobile_width_threshold = 80
-agent_panel_sort = "priority"
+agent_panel_sort = "spaces"
 show_agent_labels_on_pane_borders = false
 sidebar_width = 30
 sidebar_min_width = 22

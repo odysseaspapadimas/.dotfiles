@@ -156,6 +156,7 @@ interface ToolParams {
   timeoutSeconds?: number;
   limit?: number;
   lifecycle?: "persistent" | "task";
+  model?: string;
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   createdAfter?: string;
   updatedAfter?: string;
@@ -178,6 +179,21 @@ interface RuntimeIndex {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function parseModelOverride(value: string | undefined): { provider: string; model: string } | undefined {
+  if (value === undefined) return undefined;
+  const model = value.trim();
+  const separator = model.indexOf("/");
+  if (separator <= 0 || separator === model.length - 1) {
+    throw new Error("model must use provider/model format (for example openai-codex/gpt-5.6-luna)");
+  }
+  const provider = model.slice(0, separator);
+  const modelId = model.slice(separator + 1);
+  if (/\s/u.test(model) || provider.includes("/") || modelId.split("/").some((segment) => !segment)) {
+    throw new Error("model must use provider/model format without whitespace or empty path segments");
+  }
+  return { provider, model: modelId };
 }
 
 function textContent(content: unknown): string {
@@ -794,6 +810,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     const message = params.message?.trim();
     if (!name) throw new Error("create requires name");
     if (!message) throw new Error("create requires message");
+    const modelOverride = parseModelOverride(params.model);
     await ensureMigrated();
 
     const cwd = resolve(params.cwd?.trim() || ctx.cwd);
@@ -810,8 +827,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       sessionId,
       createdAt,
       createdBy: TOOL_NAME,
-      initialProvider: ctx.model?.provider,
-      initialModel: ctx.model?.id,
+      initialProvider: modelOverride?.provider ?? ctx.model?.provider,
+      initialModel: modelOverride?.model ?? ctx.model?.id,
       initialThinking: params.thinking ?? pi.getThinkingLevel(),
       lifecycle: params.lifecycle === "task" ? "task" : "persistent",
       parentSessionId: parentHeader?.id,
@@ -884,6 +901,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       createdAfter: Type.Optional(Type.String({ description: "List sessions created after ISO date/time or relative duration (for example 3d)" })),
       updatedAfter: Type.Optional(Type.String({ description: "List sessions updated after ISO date/time or relative duration (for example 2w)" })),
       lifecycle: Type.Optional(SessionLifecycle),
+      model: Type.Optional(Type.String({ description: "Model for create in provider/model format; inherits the current model when omitted" })),
       thinking: Type.Optional(ThinkingLevel),
       timeoutSeconds: Type.Optional(
         Type.Integer({ minimum: 1, maximum: 3600, description: "Watch timeout; default 300" }),

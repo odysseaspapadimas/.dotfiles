@@ -14,8 +14,14 @@ process.env.HERDR_WORKSPACE_ID = "w-test";
 process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS = "100";
 
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
-const { default: orchestrator, sideSharedAgentDirectory } = await import("../pi-session-orchestrator.ts");
+const { default: orchestrator, parseModelOverride, sideSharedAgentDirectory } = await import("../pi-session-orchestrator.ts");
 
+assert.deepEqual(parseModelOverride("openai-codex/gpt-5.6-luna"), {
+  provider: "openai-codex",
+  model: "gpt-5.6-luna",
+});
+assert.throws(() => parseModelOverride("gpt-5.6-luna"), /provider\/model format/);
+assert.throws(() => parseModelOverride("openai-codex/"), /provider\/model format/);
 assert.equal(sideSharedAgentDirectory(sideAgentDir, agentDir), agentDir);
 assert.equal(sideSharedAgentDirectory(sideAgentDir, undefined), agentDir);
 assert.equal(sideSharedAgentDirectory(agentDir, undefined), undefined);
@@ -144,12 +150,15 @@ const fakePi: any = {
         const hasAssistant = SessionManager.open(match[1]).getBranch().some(
           (entry: any) => entry.type === "message" && entry.message.role === "assistant",
         );
-        assert.match(text, hasAssistant ? /--provider 'test'/ : /--provider 'test-provider'/);
-        assert.match(text, hasAssistant ? /--model 'model'/ : /--model 'test-model'/);
         const metadata = SessionManager.open(match[1]).getEntries().findLast(
           (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
         )?.data;
-        assert.match(text, new RegExp(`--thinking '${metadata?.initialThinking ?? "medium"}'`));
+        assert.match(text, new RegExp(`--provider '${hasAssistant ? "test" : metadata.initialProvider}'`));
+        assert.match(text, new RegExp(`--model '${hasAssistant ? "model" : metadata.initialModel}'`));
+        const metadataForThinking = SessionManager.open(match[1]).getEntries().findLast(
+          (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+        )?.data;
+        assert.match(text, new RegExp(`--thinking '${metadataForThinking?.initialThinking ?? "medium"}'`));
         pane.agent = "pi";
         pane.agent_status = "idle";
         pane.agent_session = { kind: "path", value: match[1] };
@@ -248,6 +257,11 @@ try {
   result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
   assert.match(result.content[0].text, /historical\/stopped/);
 
+  await assert.rejects(
+    execute({ action: "create", name: "Invalid model", message: "never launched", model: "missing-provider" }),
+    /model must use provider\/model format/,
+  );
+
   // A rejected startup prompt is a failed create, its tab is closed, and the
   // durable session remains visibly incomplete until an explicit retry succeeds.
   acceptNextInitialPrompt = false;
@@ -284,7 +298,13 @@ try {
   await execute({ action: "stop", id: incompletePayload.sessionId });
   await unlink(incompletePayload.sessionPath);
 
-  result = await execute({ action: "create", name: "Lifecycle", message: "start", cwd: root }, SessionManager.open(externalPath));
+  result = await execute({
+    action: "create",
+    name: "Lifecycle",
+    message: "start",
+    cwd: root,
+    model: "openai-codex/gpt-5.6-luna",
+  }, SessionManager.open(externalPath));
   const created = result.details.session;
   assert.match(created.id, /^dir_[0-9a-f]{32}$/);
   assert.equal(created.name, "Lifecycle");
@@ -296,6 +316,8 @@ try {
   )?.data;
   assert.equal(createdMetadata.parentSessionId, external.getSessionId());
   assert.equal(createdMetadata.delegationDepth, 1);
+  assert.equal(createdMetadata.initialProvider, "openai-codex");
+  assert.equal(createdMetadata.initialModel, "gpt-5.6-luna");
   const promptEvent = eventHandlers.get("before_agent_start")?.(
     { systemPrompt: "base prompt" },
     { sessionManager: SessionManager.open(created.sessionPath) },

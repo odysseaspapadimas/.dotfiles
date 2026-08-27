@@ -3,14 +3,17 @@ use std::{
     io::{self, Stdout},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{self, Command},
+    process::{self, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -97,6 +100,9 @@ struct App {
     editor_scroll: usize,
     editor_horizontal: usize,
     editor_height: usize,
+    editor_area: Rect,
+    mouse_selecting: bool,
+    visual_rows: Vec<(usize, usize)>,
 }
 
 fn canonical(path: &Path) -> Result<PathBuf> {
@@ -493,6 +499,31 @@ fn promotion_append(content: &str, date: &str) -> Result<String> {
     Ok(format!("\n\n## {date}\n\n{body}\n"))
 }
 
+fn copy_to_clipboard(content: &str) -> Result<()> {
+    let runtime = env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| {
+        let uid = env::var("UID").unwrap_or_else(|_| "1000".to_owned());
+        format!("/run/user/{uid}").into()
+    });
+    let wayland = env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
+    let mut child = Command::new("wl-copy")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("WAYLAND_DISPLAY", wayland)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("start wl-copy")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("wl-copy stdin unavailable"))?;
+    io::Write::write_all(&mut stdin, content.as_bytes())?;
+    drop(stdin);
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("wl-copy failed");
+    }
+    Ok(())
+}
+
 fn append_journal(project_root: &Path, append: &str) -> Result<PathBuf> {
     let path = project_root.join(".agents/project-journal.md");
     let current = match fs::read_to_string(&path) {
@@ -533,6 +564,9 @@ impl App {
             editor_scroll: 0,
             editor_horizontal: 0,
             editor_height: 1,
+            editor_area: Rect::default(),
+            mouse_selecting: false,
+            visual_rows: Vec::new(),
         }
     }
 
@@ -623,14 +657,16 @@ impl App {
         self.message = "toggled strikethrough line".to_owned();
     }
 
-    fn autosave(&mut self) {
+    fn autosave(&mut self) -> bool {
         if self.save_state == SaveState::Modified
             && self
                 .last_edit
                 .is_some_and(|edited| edited.elapsed() >= AUTOSAVE_DELAY)
         {
             let _ = self.save();
+            return true;
         }
+        false
     }
 
     fn begin_promotion(&mut self) {
@@ -676,6 +712,17 @@ impl App {
             self.mode = Mode::ClearScratch;
             return false;
         }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(selected) = selected_text(&self.textarea) {
+                match copy_to_clipboard(&selected) {
+                    Ok(()) => self.message = "copied selection".to_owned(),
+                    Err(error) => self.message = error.to_string(),
+                }
+            } else {
+                self.message = "select text before copying".to_owned();
+            }
+            return false;
+        }
         if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.save().is_ok() {
                 self.message = "saved private scratch".to_owned();
@@ -686,6 +733,55 @@ impl App {
             self.changed();
         }
         false
+    }
+
+    fn mouse_position(&self, mouse: MouseEvent) -> Option<(usize, usize)> {
+        let area = self.editor_area;
+        if mouse.column < area.x
+            || mouse.column >= area.x + area.width
+            || mouse.row < area.y
+            || mouse.row >= area.y + area.height
+        {
+            return None;
+        }
+        let visual_row = self.editor_scroll + usize::from(mouse.row - area.y);
+        let &(row, start_column) = self.visual_rows.get(visual_row)?;
+        let line = self.textarea.lines().get(row)?;
+        let display_column = start_column + usize::from(mouse.column - area.x);
+        let rich = rich_line(line);
+        let column = rich
+            .source_to_display
+            .iter()
+            .rposition(|&position| position <= display_column)
+            .unwrap_or(0);
+        Some((row, column))
+    }
+
+    fn handle_edit_mouse(&mut self, mouse: MouseEvent) -> bool {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some((row, column)) = self.mouse_position(mouse) else {
+                    return false;
+                };
+                self.textarea.cancel_selection();
+                jump_to(&mut self.textarea, row, column);
+                self.textarea.start_selection();
+                self.mouse_selecting = true;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.mouse_selecting => {
+                let Some((row, column)) = self.mouse_position(mouse) else {
+                    return false;
+                };
+                jump_to(&mut self.textarea, row, column);
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.mouse_selecting = false;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn handle_preview_key(&mut self, key: KeyEvent) {
@@ -743,10 +839,12 @@ impl App {
     }
 
     fn run(mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+        terminal.draw(|frame| self.draw(frame))?;
         loop {
-            self.autosave();
-            terminal.draw(|frame| self.draw(frame))?;
             if !event::poll(Duration::from_millis(100))? {
+                if self.autosave() {
+                    terminal.draw(|frame| self.draw(frame))?;
+                }
                 continue;
             }
             match event::read()? {
@@ -765,11 +863,21 @@ impl App {
                     if close {
                         return Ok(());
                     }
+                    terminal.draw(|frame| self.draw(frame))?;
                 }
                 Event::Paste(content) if matches!(self.mode, Mode::Edit) => {
                     if self.textarea.insert_str(content) {
                         self.changed();
+                        terminal.draw(|frame| self.draw(frame))?;
                     }
+                }
+                Event::Mouse(mouse) if matches!(self.mode, Mode::Edit) => {
+                    if self.handle_edit_mouse(mouse) {
+                        terminal.draw(|frame| self.draw(frame))?;
+                    }
+                }
+                Event::Resize(_, _) => {
+                    terminal.draw(|frame| self.draw(frame))?;
                 }
                 _ => {}
             }
@@ -788,19 +896,25 @@ impl App {
         }
 
         self.editor_height = inner.height as usize;
-        let (cursor_row, cursor_column) = self.textarea.cursor();
-        if cursor_row < self.editor_scroll {
-            self.editor_scroll = cursor_row;
-        } else if cursor_row >= self.editor_scroll + self.editor_height {
-            self.editor_scroll = cursor_row + 1 - self.editor_height;
-        }
-
+        self.editor_area = inner;
+        self.editor_horizontal = 0;
+        let editor_width = inner.width as usize;
         let rich_lines: Vec<_> = self
             .textarea
             .lines()
             .iter()
             .map(|line| rich_line(line))
             .collect();
+        self.visual_rows.clear();
+        for (row, rich) in rich_lines.iter().enumerate() {
+            let width = rich.source_to_display.last().copied().unwrap_or(0);
+            let row_count = width.max(1).div_ceil(editor_width);
+            for segment in 0..row_count {
+                self.visual_rows.push((row, segment * editor_width));
+            }
+        }
+
+        let (cursor_row, cursor_column) = self.textarea.cursor();
         let cursor_display = rich_lines[cursor_row]
             .source_to_display
             .get(cursor_column)
@@ -811,21 +925,33 @@ impl App {
                     .last()
                     .unwrap_or(&0)
             });
-        let editor_width = inner.width as usize;
-        if cursor_display < self.editor_horizontal {
-            self.editor_horizontal = cursor_display;
-        } else if cursor_display >= self.editor_horizontal + editor_width {
-            self.editor_horizontal = cursor_display + 1 - editor_width;
+        let cursor_visual = self
+            .visual_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, (row, start))| *row == cursor_row && *start <= cursor_display)
+            .map(|(index, _)| index)
+            .next_back()
+            .unwrap_or(0);
+        if cursor_visual < self.editor_scroll {
+            self.editor_scroll = cursor_visual;
+        } else if cursor_visual >= self.editor_scroll + self.editor_height {
+            self.editor_scroll = cursor_visual + 1 - self.editor_height;
         }
 
         let selection = self.textarea.selection_range();
-        let rendered: Vec<Line<'static>> = rich_lines
+        let rendered: Vec<Line<'static>> = self
+            .visual_rows
             .iter()
-            .enumerate()
-            .map(|(row, rich)| {
+            .map(|&(row, start)| {
+                let rich = &rich_lines[row];
                 let spans = rich
                     .glyphs
                     .iter()
+                    .filter(|glyph| {
+                        let position = rich.source_to_display[glyph.source_column];
+                        position >= start && position < start + editor_width
+                    })
                     .map(|glyph| {
                         let mut style = Style::default();
                         if glyph.struck {
@@ -848,16 +974,15 @@ impl App {
             );
         } else {
             frame.render_widget(
-                Paragraph::new(rendered).scroll((
-                    self.editor_scroll.min(u16::MAX as usize) as u16,
-                    self.editor_horizontal.min(u16::MAX as usize) as u16,
-                )),
+                Paragraph::new(rendered)
+                    .scroll((self.editor_scroll.min(u16::MAX as usize) as u16, 0)),
                 inner,
             );
         }
 
-        let cursor_x = inner.x + cursor_display.saturating_sub(self.editor_horizontal) as u16;
-        let cursor_y = inner.y + cursor_row.saturating_sub(self.editor_scroll) as u16;
+        let cursor_start = self.visual_rows[cursor_visual].1;
+        let cursor_x = inner.x + cursor_display.saturating_sub(cursor_start) as u16;
+        let cursor_y = inner.y + cursor_visual.saturating_sub(self.editor_scroll) as u16;
         Some((
             cursor_x.min(inner.x + inner.width.saturating_sub(1)),
             cursor_y.min(inner.y + inner.height.saturating_sub(1)),
@@ -901,7 +1026,7 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    " · private · Ctrl+S save · Alt+T todo · Alt+S strike · F2 promote · F8 clear · Esc close",
+                    " · private · Ctrl+C copy · Ctrl+S save · Alt+T todo · Alt+S strike · F2 promote · F8 clear · Esc close",
                     Style::default().fg(MUTED),
                 ),
                 Span::raw(if self.message.is_empty() {
@@ -1018,13 +1143,13 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
 fn interactive(paths: ProjectPaths, content: &str) -> Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let _guard = TerminalGuard;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;

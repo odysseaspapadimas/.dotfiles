@@ -233,15 +233,8 @@ export default function changedFilesLedgerExtension(pi: ExtensionAPI) {
   }
 
   function updateDisabledStatus(ctx: ExtensionContext): void {
-    if (!ctx.hasUI || widgetHidden) return;
-    if (disabledReason?.includes("not inside a Git worktree")) {
-      ctx.ui.setStatus(WIDGET_ID, undefined);
-      return;
-    }
-    const detail = disabledReason?.includes("candidate files")
-      ? "too many project files"
-      : "safety limit exceeded";
-    ctx.ui.setStatus(WIDGET_ID, ctx.ui.theme.fg("warning", `changes: disabled (${detail})`));
+    if (!ctx.hasUI) return;
+    ctx.ui.setStatus(WIDGET_ID, undefined);
   }
 
   function formatWidgetStats(
