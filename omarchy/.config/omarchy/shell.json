@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "idle": {
+    "screensaver": 86400,
+    "lock": 300
+  },
+  "bar": {
+    "position": "top",
+    "transparent": false,
+    "centerAnchor": "",
+    "layout": {
+      "left": [
+        {
+          "id": "omarchy.menu"
+        },
+        {
+          "id": "odysseas.workspaces"
+        },
+        {
+          "id": "quickshell.spotify",
+          "deviceName": "Omarchy Spotify",
+          "idleShutdownMinutes": 15,
+          "showMiniPlayer": "On",
+          "shortcutPlayer": "Full player",
+          "shortcutHints": "On",
+          "showTrackTitle": "On",
+          "showArtistName": "Off",
+          "scrollBarText": "Off",
+          "scrollSpeed": "1",
+          "maxBarTextWidth": "240",
+          "audioQuality": "320 kbps",
+          "searchHistory": "[\"τι τραγουδι να σου πω bloody\",\"dukys\",\"doukys\",\"loser\"]",
+          "sessionState": "{\"tab\":\"home\",\"searchText\":\"           \",\"searchType\":\"track\",\"libraryType\":\"tracks\",\"homeType\":\"recent\",\"libraryFilter\":\"\",\"librarySort\":\"default\",\"playlistFilter\":\"\",\"playlistSort\":\"default\",\"detailFilter\":\"τι τραγουδι να σου πω bloody\",\"detailSort\":\"default\",\"homeFilter\":\"dukys\",\"discoverFilter\":\"doukys\",\"queueFilter\":\"\",\"artistSearchText\":\"\",\"scrollPositions\":{\"home:recent\":0,\"search:album\":184,\"library:tracks\":0,\"playlist:\":0,\"discover\":0,\"detail:spotify:playlist:37i9dQZF1E38c5egNlq2d0\":0,\"detail:spotify:playlist:37i9dQZF1E360394CbaBNx\":0,\"detail:spotify:playlist:37i9dQZEVXbxvuXpXEGYry\":0,\"search:artist\":0,\"detail:spotify:artist:2sodpTtk7UOG4z5ZtIHg89\":0,\"detail:spotify:album:0MYP0iGWG2HpJR687s6twz\":0,\"search:track\":0},\"detailItem\":null,\"selectedPlaylistId\":\"\",\"lastRadioPlaylist\":null}"
+        }
+      ],
+      "center": [
+        {
+          "id": "omarchy.clock",
+          "format": "ddd d MMM HH:mm",
+          "formatAlt": "d MMMM 'W'ww yyyy",
+          "verticalFormat": "HH\n—\nmm",
+          "birthYear": 0,
+          "lifeExpectancy": 90
+        },
+        {
+          "id": "omarchy.weather"
+        }
+      ],
+      "right": [
+        {
+          "id": "omarchy.system-update"
+        },
+        {
+          "id": "omarchy.indicators"
+        },
+        {
+          "id": "omarchy.keyboard-layout"
+        },
+        {
+          "id": "omarchy.tray"
+        },
+        {
+          "id": "odysseas.bluetooth"
+        },
+        {
+          "id": "odysseas.wireguard"
+        },
+        {
+          "id": "omarchy.network"
+        },
+        {
+          "id": "omarchy.audio"
+        },
+        {
+          "id": "omarchy.power",
+          "showPercentage": true
+        }
+      ]
+    }
+  },
+  "plugins": []
+}
