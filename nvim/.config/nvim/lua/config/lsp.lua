@@ -80,7 +80,9 @@ end, "Previous diagnostic")
 map("n", "<leader>de", vim.diagnostic.open_float, "Line diagnostics")
 map("n", "<leader>dq", vim.diagnostic.setloclist, "Diagnostics to location list")
 
+local lsp_group = vim.api.nvim_create_augroup("config-lsp", { clear = true })
 vim.api.nvim_create_autocmd("LspAttach", {
+  group = lsp_group,
   callback = function(event)
     local function buffer_map(mode, lhs, rhs, description)
       vim.keymap.set(mode, lhs, rhs, {

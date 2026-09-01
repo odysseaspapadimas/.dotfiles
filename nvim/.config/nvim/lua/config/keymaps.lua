@@ -2,6 +2,16 @@ local function map(mode, lhs, rhs, description)
   vim.keymap.set(mode, lhs, rhs, { silent = true, desc = description })
 end
 
+local function reload_config()
+  for name in pairs(package.loaded) do
+    if name:match("^config%.") then
+      package.loaded[name] = nil
+    end
+  end
+  dofile(vim.env.MYVIMRC)
+  vim.notify("Neovim configuration reloaded")
+end
+
 local function smart_close_buffer()
   local current = vim.api.nvim_get_current_buf()
   local listed = vim.tbl_filter(function(buffer)
@@ -24,6 +34,7 @@ end, "Git status")
 map("n", "<leader>bd", smart_close_buffer, "Close buffer")
 map("n", "<leader>bn", "<cmd>enew<CR>", "New buffer")
 map("n", "<leader>bb", "<C-^>", "Alternate buffer")
+map("n", "<leader>rr", reload_config, "Reload Neovim config")
 map("n", "<leader>uw", "<cmd>set wrap!<CR>", "Toggle line wrap")
 map("n", "[b", "<cmd>bprevious<CR>", "Previous buffer")
 map("n", "]b", "<cmd>bnext<CR>", "Next buffer")

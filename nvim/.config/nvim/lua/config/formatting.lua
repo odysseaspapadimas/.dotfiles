@@ -54,6 +54,7 @@ vim.api.nvim_create_user_command("FormatToggle", function(args)
 end, {
   bang = true,
   desc = "Toggle format on save for buffer; use ! for global",
+  force = true,
 })
 
 vim.keymap.set({ "n", "x" }, "<leader>cf", function()

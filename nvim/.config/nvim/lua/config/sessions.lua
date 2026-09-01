@@ -42,7 +42,9 @@ local function restore_requested_files(requested, cursor_line)
   end
 end
 
+local sessions_group = vim.api.nvim_create_augroup("config-sessions", { clear = true })
 vim.api.nvim_create_autocmd("VimEnter", {
+  group = sessions_group,
   once = true,
   callback = function()
     local requested = vim.fn.argv()
@@ -67,4 +69,4 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 vim.api.nvim_create_user_command("WorkspaceSessionSave", function()
   MiniSessions.write(session_name, { verbose = true })
-end, { desc = "Save the current workspace session" })
+end, { desc = "Save the current workspace session", force = true })

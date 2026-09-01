@@ -37,7 +37,7 @@ function M.grep()
   MiniPick.builtin.grep_live({}, { source = { cwd = root } })
 end
 
-vim.api.nvim_create_user_command("WorkspaceFiles", M.files, { desc = "Find project files" })
+vim.api.nvim_create_user_command("WorkspaceFiles", M.files, { desc = "Find project files", force = true })
 
 vim.keymap.set("n", "<C-p>", M.files, { silent = true, desc = "Find files" })
 vim.keymap.set("n", "<leader>fg", M.grep, { silent = true, desc = "Live grep" })

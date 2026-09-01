@@ -18,6 +18,7 @@ Each canonical project root has a persistent `mini.sessions` session under Neovi
 - `[b` / `]b`: previous/next buffer in the buffer list
 - `Space b n`: create a new empty buffer
 - `Space b d`: close buffer
+- `Space r r`: reload the Neovim configuration
 
 ## Git
 
