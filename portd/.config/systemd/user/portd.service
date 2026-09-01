@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/portd --host ubuntu
+ExecStart=%h/.local/bin/portd --host ubuntu --reverse-forward 5038:5039
 Restart=on-failure
 RestartSec=3
 

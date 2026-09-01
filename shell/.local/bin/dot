@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
-packages=(pi herdr hunk portd nvim ghostty kitty shell)
+packages=(pi herdr hunk portd nvim ghostty kitty omarchy shell)
 stow_only=false
 
 if [[ ${1:-} == "--stow-only" ]]; then

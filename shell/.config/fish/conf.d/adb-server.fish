@@ -1,0 +1,1 @@
+set -gx ADB_SERVER_SOCKET tcp:127.0.0.1:5039

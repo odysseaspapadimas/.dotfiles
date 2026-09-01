@@ -31,6 +31,7 @@ herdr-w             # Attach to the remote Ubuntu work session
 - `nvim` — Neovim workspace configuration used by the standalone Herdr editor.
 - `ghostty` — Ghostty settings and Catppuccin Mocha theme.
 - `kitty` — Kitty settings and Catppuccin Mocha theme.
+- `omarchy` — Personal shell layout, custom plugins and hooks, menu/branding overrides, and custom themes.
 - `herdr` — Herdr keybindings, UI preferences, custom commands, and helper-tool source.
 - `hunk` — Hunk Catppuccin Mocha review theme.
 - `portd` — SSH development-port forwarding, Linux user service, and Herdr plugin.
