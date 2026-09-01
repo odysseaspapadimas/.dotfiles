@@ -1,4 +1,4 @@
 # This file contains fish universal variable definitions.
 # VERSION: 3.0
-SETUVAR __fish_initialized:4300
+SETUVAR __fish_initialized:3800
 SETUVAR fish_user_paths:/usr/share/omarchy/bin\x1e/home/odysseas/\x2elocal/bin
