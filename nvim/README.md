@@ -1,6 +1,6 @@
 # Neovim workspace configuration
 
-A focused Neovim 0.12+ setup for the standalone Herdr `workspace-editor`. Plugins are managed by native `vim.pack`; commit `nvim-pack-lock.json` to keep installations reproducible.
+A focused Neovim 0.12+ setup for the standalone Herdr `workspace-editor`. Plugins are managed by native `vim.pack`; commit `nvim-pack-lock.json` to keep installations reproducible. The top bar shows every open buffer, with the current and modified buffers highlighted.
 
 Each canonical project root has a persistent `mini.sessions` session under Neovim's data directory. Cleanly leaving the editor records open buffers, windows, tabs, cwd, folds, and local options. Reopening restores that state. A project without a saved session starts with Neo-tree open; the file picker opens only when explicitly requested with `Ctrl+P`.
 
