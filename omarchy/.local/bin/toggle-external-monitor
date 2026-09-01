@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DUAL_PROFILE="profile-20260824-105617"
+LAPTOP_PROFILE="laptop-only"
+
+active_profile=$(hyprmoncfg status | awk -F': ' '/^Active profile:/ { print $2; exit }')
+
+if [[ "$active_profile" == "$LAPTOP_PROFILE" ]]; then
+  target="$DUAL_PROFILE"
+  message="External monitor enabled"
+else
+  target="$LAPTOP_PROFILE"
+  message="External monitor disabled"
+fi
+
+hyprmoncfg apply "$target" --confirm-timeout 0
+notify-send "Display configuration" "$message"
