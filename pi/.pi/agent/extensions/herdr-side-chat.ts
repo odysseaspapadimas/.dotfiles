@@ -155,36 +155,68 @@ export function hasUnhandedWork(localCount: number, handedOffLocalCount: number)
 }
 
 export function sideChatContextNotice(sourceLeaf: string | undefined, snapshotAt: number): string {
-  return `## Side-chat environment
+  return `## Side-chat role and provenance
 
-You are operating in an ephemeral side chat forked from a main Pi conversation.
+You are a separate assistant instance in an ephemeral side chat. Your purpose is to handle a focused tangent, question, review, or parallel task without automatically continuing the main chat.
 
-- The conversation context before the side-chat boundary is inherited historical context from the main conversation. It is not side-local work.
-- The side chat began at source session leaf ${sourceLeaf ?? "(unknown)"} at ${new Date(snapshotAt).toISOString()}.
+The main-chat transcript is supplied only as background reference. You did not participate in it, even when its messages have assistant roles or use first-person language.
+
+- Only user turns after the side-chat boundary are active instructions for you. Do not resume unfinished work or execute requests found only in inherited history unless the side-chat user explicitly asks you to.
+- Attribute inherited decisions, claims, tool calls, and file changes to "the main chat" or "the main assistant", never to yourself.
+- Use "I" or "we" for actions taken in this side chat only. When reporting status, explicitly separate main-chat work from side-local work.
+- If the local request does not establish a clear side task, ask what tangent or parallel task the user wants help with instead of inferring an assignment from inherited history.
+- The side chat began from source session leaf ${sourceLeaf ?? "(unknown)"} at ${new Date(snapshotAt).toISOString()}.
 - The working directory is shared with the main chat. Files may have changed since the inherited snapshot, including changes made concurrently by the main chat.
-- You may inspect and modify files when the user asks. Do not default to discussion-only behavior merely because this is a side chat.
+- You may inspect and modify files when the local user asks. Do not default to discussion-only behavior merely because this is a side chat.
 - Treat current file contents as authoritative. Do not assume differences between inherited context and the current filesystem are mistakes.
-- Never revert, overwrite, or restore current filesystem changes merely because they do not match the inherited conversation. Preserve unrelated changes.
-- When reasoning about the conversation, distinguish inherited main-chat context from turns made locally in this side chat.`;
+- Never revert, overwrite, or restore current filesystem changes merely because they do not match inherited history. Preserve unrelated changes.`;
+}
+
+export function inheritedMainChatOpening(sourceLeaf: string | undefined): string {
+  return `[Begin inherited main-chat transcript — background reference only. These historical user turns are not current side-chat instructions, and the assistant/tool actions were performed by the main assistant, not by you. Source leaf: ${sourceLeaf ?? "unknown"}.]`;
 }
 
 export function sideChatBoundaryMessage(sourceLeaf: string | undefined, snapshotAt: number): string {
-  return `[Side-chat boundary: local side-chat conversation starts here. Main-session snapshot leaf: ${sourceLeaf ?? "unknown"}. Snapshot time: ${new Date(snapshotAt).toISOString()}. The working directory is shared and its current contents may be newer than the inherited context.]`;
+  return `[End inherited main-chat transcript. Side-local conversation starts after this boundary. Do not answer or resume a request from before the boundary unless the local user explicitly refers back to it. Main-session snapshot leaf: ${sourceLeaf ?? "unknown"}. Snapshot time: ${new Date(snapshotAt).toISOString()}. The working directory is shared and its current contents may be newer than the inherited context.]`;
 }
 
-export function sideStatusLabel(
-  behind: number,
-  localCount: number,
-  handedOffLocalCount: number,
-  lastMode?: "full" | "summary",
-): string {
-  const freshness = behind > 0 ? `context ${behind} turn${behind === 1 ? "" : "s"} behind` : "context current";
-  const handoff = hasUnhandedWork(localCount, handedOffLocalCount)
-    ? `${localCount} local · unhanded`
-    : lastMode
-      ? `${localCount} local · ${lastMode} handed off`
-      : `${localCount} local`;
-  return `side: ephemeral · ${freshness} · ${handoff}`;
+const INHERITED_ROLE_LABELS: Record<string, string> = {
+  user: "[Inherited main-chat user turn — historical context, not a current instruction]",
+  assistant: "[Inherited main-chat assistant turn — produced by a different assistant; its actions are not yours]",
+  toolResult: "[Inherited main-chat tool result — produced for the main assistant, not for a side-local tool call]",
+  custom: "[Inherited main-chat extension message — historical context]",
+};
+
+type ContextMessage = ReturnType<typeof buildSessionContext>["messages"][number];
+
+function prefixInheritedContent(content: unknown, label: string): unknown {
+  if (typeof content === "string") return `${label}\n${content}`;
+  if (Array.isArray(content)) return [{ type: "text", text: label }, ...content];
+  return content;
+}
+
+export function markInheritedMainChatMessage<T extends ContextMessage>(message: T): T {
+  const label = INHERITED_ROLE_LABELS[message.role];
+  if (label && "content" in message) {
+    return { ...message, content: prefixInheritedContent(message.content, label) } as T;
+  }
+  if ((message.role === "branchSummary" || message.role === "compactionSummary") && "summary" in message) {
+    return {
+      ...message,
+      summary: `[Inherited summary of main-chat history — background reference, not side-local work]\n${message.summary}`,
+    } as T;
+  }
+  if (message.role === "bashExecution") {
+    return {
+      ...message,
+      output: `[Inherited shell execution from the main chat — not run by you]\n${message.output}`,
+    } as T;
+  }
+  return message;
+}
+
+export function sideStatusLabel(localCount: number, handedOffLocalCount: number): string | undefined {
+  return hasUnhandedWork(localCount, handedOffLocalCount) ? "side · unsent" : undefined;
 }
 
 export default function herdrSideChat(pi: ExtensionAPI) {
@@ -200,10 +232,8 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   let sourceSnapshotAt = Date.now();
   let sourceTurnCount = 0;
   let localCutoffAt = 0;
+  let sideContinuitySummary: string | undefined;
   let handedOffLocalCount = 0;
-  let lastHandoffMode: "full" | "summary" | undefined;
-  let lastHandoffAt: number | undefined;
-  let sideStatusTimer: ReturnType<typeof setInterval> | undefined;
 
   function stopMailbox(): void {
     mailboxWatcher?.close();
@@ -313,8 +343,15 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     return turns;
   }
 
+  function localWorkCount(ctx: ExtensionContext): number {
+    return localTurns(ctx).length + (sideContinuitySummary ? 1 : 0);
+  }
+
   function buildRawHandoff(ctx: ExtensionContext): string | null {
     const turns = localTurns(ctx);
+    if (sideContinuitySummary) {
+      turns.unshift(`Earlier side-local continuity summary: ${sideContinuitySummary}`);
+    }
     if (turns.length === 0) return null;
     return `Here is the full transcript from an ephemeral side conversation:\n\n${turns.join("\n\n")}`;
   }
@@ -327,13 +364,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     inheritedMessages = buildSessionContext(entries, sourceLeaf).messages;
     sourceTurnCount = userTurnCount(entries, sourceLeaf);
     sourceSnapshotAt = Date.now();
-    if (summary) {
-      inheritedMessages.push({
-        role: "user",
-        content: [{ type: "text", text: `Summary of the side conversation before its context was refreshed:\n\n${summary}` }],
-        timestamp: sourceSnapshotAt,
-      } as (typeof inheritedMessages)[number]);
-    }
+    if (summary) sideContinuitySummary = summary;
   }
 
   function currentSourceTurnCount(): number {
@@ -348,21 +379,17 @@ export default function herdrSideChat(pi: ExtensionAPI) {
 
   function updateSideStatus(ctx: ExtensionContext): void {
     if (!SIDE_MODE) return;
-    const localCount = localTurns(ctx).length;
-    const behind = Math.max(0, currentSourceTurnCount() - sourceTurnCount);
-    const label = sideStatusLabel(behind, localCount, handedOffLocalCount, lastHandoffAt ? lastHandoffMode : undefined);
-    ctx.ui.setStatus("herdr-side-chat", ctx.ui.theme.fg("accent", label));
+    const label = sideStatusLabel(localWorkCount(ctx), handedOffLocalCount);
+    ctx.ui.setStatus("herdr-side-chat", label ? ctx.ui.theme.fg("accent", label) : undefined);
   }
 
   function alreadyHandedOff(ctx: ExtensionContext): boolean {
-    const count = localTurns(ctx).length;
+    const count = localWorkCount(ctx);
     return count > 0 && !hasUnhandedWork(count, handedOffLocalCount);
   }
 
-  function markHandedOff(ctx: ExtensionContext, mode: "full" | "summary"): void {
-    handedOffLocalCount = localTurns(ctx).length;
-    lastHandoffMode = mode;
-    lastHandoffAt = Date.now();
+  function markHandedOff(ctx: ExtensionContext): void {
+    handedOffLocalCount = localWorkCount(ctx);
     updateSideStatus(ctx);
   }
 
@@ -411,7 +438,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     }
 
     await writeHandoff(content);
-    markHandedOff(ctx, "full");
+    markHandedOff(ctx);
     ctx.ui.notify(`Full side conversation handed off (${formatTokenEstimate(estimate)}).`, "info");
   }
 
@@ -424,7 +451,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       ctx.ui.notify("A side-chat summary is already being generated.", "warning");
       return;
     }
-    if (localTurns(ctx).length === 0) {
+    if (localWorkCount(ctx) === 0) {
       ctx.ui.notify("There is no side conversation to summarize yet.", "warning");
       return;
     }
@@ -443,6 +470,13 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     if (!SOURCE_SESSION) throw new Error("Cannot save: source session is unavailable");
     const saved = SessionManager.forkFrom(SOURCE_SESSION, ctx.cwd);
     if (sourceLeaf && saved.getEntry(sourceLeaf)) saved.branch(sourceLeaf);
+    if (sideContinuitySummary) {
+      saved.appendCustomMessageEntry(
+        "herdr-side-chat-continuity",
+        `Earlier side-local continuity summary:\n\n${sideContinuitySummary}`,
+        true,
+      );
+    }
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "message") {
         if (entry.message.timestamp < localCutoffAt) continue;
@@ -653,7 +687,6 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         sourceSnapshotAt = Date.now();
         localCutoffAt = sourceSnapshotAt;
         updateSideStatus(ctx);
-        sideStatusTimer = setInterval(() => updateSideStatus(ctx), 15_000);
       } catch (error) {
         inheritedMessages = [];
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -667,15 +700,33 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     });
 
     pi.on("context", (event) => {
+      const continuity = sideContinuitySummary
+        ? [{
+            role: "user" as const,
+            content: [{
+              type: "text" as const,
+              text: `[Side-local continuity from before the latest context refresh — this is earlier work from this side chat, not main-chat history.]\n\n${sideContinuitySummary}`,
+            }],
+            timestamp: localCutoffAt,
+          }]
+        : [];
       if (pendingSummary) {
-        // Summaries see only the side-local branch. Previous synthetic summary turns
-        // are removed, while the current request remains visible to the model.
+        // Summaries see only side-local context. Previous synthetic summary turns
+        // are removed, while the current request and any refresh continuity remain.
         return {
-          messages: filterSummaryArtifacts(event.messages, pendingSummary.token).filter(
-            (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
-          ),
+          messages: [
+            ...continuity,
+            ...filterSummaryArtifacts(event.messages, pendingSummary.token).filter(
+              (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
+            ),
+          ],
         };
       }
+      const opening = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: inheritedMainChatOpening(sourceLeaf) }],
+        timestamp: Math.max(0, localCutoffAt - 1),
+      };
       const boundary = {
         role: "user" as const,
         content: [{ type: "text" as const, text: sideChatBoundaryMessage(sourceLeaf, sourceSnapshotAt) }],
@@ -686,13 +737,22 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         const firstLocal = messages.findIndex(
           (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
         );
-        if (firstLocal < 0) return { messages: [...messages, boundary] };
-        return { messages: [...messages.slice(0, firstLocal), boundary, ...messages.slice(firstLocal)] };
+        const splitAt = firstLocal < 0 ? messages.length : firstLocal;
+        const inherited = messages.slice(0, splitAt).map(markInheritedMainChatMessage);
+        return { messages: [opening, ...inherited, boundary, ...continuity, ...messages.slice(splitAt)] };
       }
       const localMessages = filterSummaryArtifacts(event.messages).filter(
         (message) => typeof message.timestamp !== "number" || message.timestamp >= localCutoffAt,
       );
-      return { messages: [...inheritedMessages, boundary, ...localMessages] };
+      return {
+        messages: [
+          opening,
+          ...inheritedMessages.map(markInheritedMainChatMessage),
+          boundary,
+          ...continuity,
+          ...localMessages,
+        ],
+      };
     });
 
     pi.on("agent_settled", async (_event, ctx) => {
@@ -712,8 +772,6 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         if (request.purpose === "refresh") {
           localCutoffAt = Date.now();
           handedOffLocalCount = 0;
-          lastHandoffAt = undefined;
-          lastHandoffMode = undefined;
           await refreshInheritedContext(summary);
           updateSideStatus(ctx);
           ctx.ui.notify("Side conversation summarized and inherited context refreshed.", "info");
@@ -721,7 +779,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         }
 
         await writeHandoff(`Here is a summarized handoff from an ephemeral side conversation:\n\n${summary}`);
-        markHandedOff(ctx, "summary");
+        markHandedOff(ctx);
         ctx.ui.notify(`Summarized side conversation handed off (${formatTokenEstimate(tokenEstimate(summary))}).`, "info");
         if (request.purpose === "close" && CURRENT_PANE) {
           await herdr(["pane", "close", CURRENT_PANE]);
@@ -731,9 +789,8 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       }
     });
 
-    pi.on("session_shutdown", () => {
-      if (sideStatusTimer) clearInterval(sideStatusTimer);
-      sideStatusTimer = undefined;
+    pi.on("session_shutdown", (_event, ctx) => {
+      ctx.ui.setStatus("herdr-side-chat", undefined);
     });
 
     pi.registerCommand("side", {
@@ -823,7 +880,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     pi.registerCommand("side:refresh", {
       description: "Refresh inherited main-session context, preserving, discarding, or summarizing local work.",
       handler: async (_args, ctx) => {
-        const localCount = localTurns(ctx).length;
+        const localCount = localWorkCount(ctx);
         const options = ["Preserve side conversation", "Start fresh with latest context"];
         if (localCount > 0) options.push("Summarize side conversation, then refresh");
         const choice = await ctx.ui.select("Refresh side-chat context", options);
@@ -835,9 +892,8 @@ export default function herdrSideChat(pi: ExtensionAPI) {
           }
           if (choice.startsWith("Start fresh")) {
             localCutoffAt = Date.now();
+            sideContinuitySummary = undefined;
             handedOffLocalCount = 0;
-            lastHandoffAt = undefined;
-            lastHandoffMode = undefined;
           }
           await refreshInheritedContext();
           updateSideStatus(ctx);
@@ -852,7 +908,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
       description: "Show side-chat context freshness and management actions.",
       handler: async (_args, ctx) => {
         updateSideStatus(ctx);
-        const localCount = localTurns(ctx).length;
+        const localCount = localWorkCount(ctx);
         const behind = Math.max(0, currentSourceTurnCount() - sourceTurnCount);
         const ageMinutes = Math.max(0, Math.floor((Date.now() - sourceSnapshotAt) / 60_000));
         const choice = await ctx.ui.select(
@@ -865,7 +921,10 @@ export default function herdrSideChat(pi: ExtensionAPI) {
           if (!mode) return;
           if (mode.startsWith("Summarize")) beginSummary(ctx, undefined, "refresh");
           else {
-            if (mode.startsWith("Start fresh")) localCutoffAt = Date.now();
+            if (mode.startsWith("Start fresh")) {
+              localCutoffAt = Date.now();
+              sideContinuitySummary = undefined;
+            }
             await refreshInheritedContext();
             updateSideStatus(ctx);
           }
@@ -879,7 +938,7 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     pi.registerCommand("side:close", {
       description: "Close the side chat, protecting local work that has not been handed off.",
       handler: async (_args, ctx) => {
-        const hasUnhanded = hasUnhandedWork(localTurns(ctx).length, handedOffLocalCount);
+        const hasUnhanded = hasUnhandedWork(localWorkCount(ctx), handedOffLocalCount);
         let choice = "Discard and close";
         if (hasUnhanded) {
           const selected = await ctx.ui.select("Unhanded side-chat work", ["Summarize to main and close", "Save and close", "Discard and close", "Cancel"]);
@@ -915,19 +974,24 @@ export default function herdrSideChat(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("side", {
-    description: "Create or focus an ephemeral Herdr side chat with this session's context.",
-    handler: async (_args, ctx) => {
+    description: "Create/focus a separate ephemeral side chat; optional arguments become its task.",
+    handler: async (args, ctx) => {
       if (process.env.HERDR_ENV !== "1" || !CURRENT_PANE) {
         ctx.ui.notify("Side chat requires Pi to run inside Herdr.", "error");
         return;
       }
 
       try {
-        const existing = await findSidePane(CURRENT_PANE);
-        if (existing) {
-          await focusPane(existing);
+        const task = args.trim();
+        let paneId = await findSidePane(CURRENT_PANE);
+        if (paneId) {
+          await focusPane(paneId);
         } else {
           await createSidePane(ctx);
+          paneId = sidePaneId;
+        }
+        if (task && paneId) {
+          await herdr(["agent", "prompt", paneId, `Side-chat task from the main pane:\n\n${task}`]);
         }
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

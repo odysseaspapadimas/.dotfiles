@@ -18,7 +18,7 @@ const CHORD_TIMEOUT_MS = 2_000;
 
 type LeaderCommand =
   | { label: string; action: AppKeybinding }
-  | { label: string; command: string; preserveDraft?: boolean };
+  | { label: string; command: string; preserveDraft?: boolean; useDraftAsArgs?: boolean };
 
 const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   c: { label: "copy", action: "app.message.copy" },
@@ -32,7 +32,7 @@ const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   h: { label: "share", command: "/share", preserveDraft: true },
   o: { label: "quota", command: "/codex-quota", preserveDraft: true },
   i: { label: "login", command: "/login", preserveDraft: true },
-  b: { label: "side chat", command: "/side", preserveDraft: true },
+  b: { label: "side chat", command: "/side", preserveDraft: true, useDraftAsArgs: true },
   d: { label: "diff", command: "/diff", preserveDraft: true },
   f: { label: "file viewer", command: "/view", preserveDraft: true },
   z: { label: "restore files", command: "/restore", preserveDraft: true },
@@ -196,8 +196,12 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
           return;
         }
 
+        const submittedCommand = draft.length > 0 && command.useDraftAsArgs
+          ? `${command.command} ${draft}`
+          : command.command;
+
         if (draft.length > 0) {
-          const submitted = this.onSubmit?.(command.command) as unknown;
+          const submitted = this.onSubmit?.(submittedCommand) as unknown;
           void Promise.resolve(submitted).finally(() => {
             this.setText(draft);
             this.tui.requestRender();
@@ -205,7 +209,7 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
           return;
         }
 
-        this.onSubmit?.(command.command);
+        this.onSubmit?.(submittedCommand);
       }
 
       handleInput(data: string): void {
