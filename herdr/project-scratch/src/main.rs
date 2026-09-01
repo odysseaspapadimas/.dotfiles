@@ -1,13 +1,14 @@
 use std::{
     env, fs,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{self, Command, Stdio},
+    process::{self, Command},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use crossterm::{
     event::{
@@ -500,27 +501,13 @@ fn promotion_append(content: &str, date: &str) -> Result<String> {
 }
 
 fn copy_to_clipboard(content: &str) -> Result<()> {
-    let runtime = env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| {
-        let uid = env::var("UID").unwrap_or_else(|_| "1000".to_owned());
-        format!("/run/user/{uid}").into()
-    });
-    let wayland = env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
-    let mut child = Command::new("wl-copy")
-        .env("XDG_RUNTIME_DIR", runtime)
-        .env("WAYLAND_DISPLAY", wayland)
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("start wl-copy")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("wl-copy stdin unavailable"))?;
-    io::Write::write_all(&mut stdin, content.as_bytes())?;
-    drop(stdin);
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("wl-copy failed");
-    }
+    // Ask the terminal client to set its clipboard. Unlike wl-copy, OSC 52 also
+    // works through Herdr's remote bridge and does not leave an ownership process
+    // running after the popup closes.
+    let encoded = BASE64.encode(content);
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "\x1b]52;c;{encoded}\x07")?;
+    io::Write::flush(&mut stdout)?;
     Ok(())
 }
 

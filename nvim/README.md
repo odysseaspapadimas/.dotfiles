@@ -14,7 +14,9 @@ Each canonical project root has a persistent `mini.sessions` session under Neovi
 - `Space f s` / `Space f S`: document/workspace symbols
 - `Space e`: toggle Neo-tree
 - `Space g s`: Git-status tree; multi-repository workspaces first prompt for a repository
-- `[b` / `]b`: previous/next buffer
+- `Space b b` (or `Ctrl+^`): switch to the alternate/previous file
+- `[b` / `]b`: previous/next buffer in the buffer list
+- `Space b n`: create a new empty buffer
 - `Space b d`: close buffer
 
 ## Git
