@@ -17,7 +17,23 @@ vim.cmd.colorscheme("catppuccin")
 require("mini.icons").setup()
 MiniIcons.mock_nvim_web_devicons()
 require("mini.statusline").setup({ use_icons = true })
-require("mini.tabline").setup()
+require("mini.tabline").setup({
+  tabpage_section = "none",
+  format = function(buffer, label)
+    local name = MiniTabline.default_format(buffer, label):gsub("%s+$", "")
+    local modified = vim.bo[buffer].modified and " ●" or ""
+    return name .. modified .. " │ "
+  end,
+})
+
+local palette = require("catppuccin.palettes").get_palette("mocha")
+vim.api.nvim_set_hl(0, "MiniTablineCurrent", { fg = palette.lavender, bg = palette.surface0, bold = true })
+vim.api.nvim_set_hl(0, "MiniTablineVisible", { fg = palette.text, bg = palette.mantle })
+vim.api.nvim_set_hl(0, "MiniTablineHidden", { fg = palette.overlay1, bg = palette.base })
+vim.api.nvim_set_hl(0, "MiniTablineModifiedCurrent", { fg = palette.peach, bg = palette.surface0, bold = true })
+vim.api.nvim_set_hl(0, "MiniTablineModifiedVisible", { fg = palette.peach, bg = palette.mantle })
+vim.api.nvim_set_hl(0, "MiniTablineModifiedHidden", { fg = palette.peach, bg = palette.base })
+vim.api.nvim_set_hl(0, "MiniTablineFill", { bg = palette.base })
 
 require("neo-tree").setup({
   auto_clean_after_session_restore = true,
