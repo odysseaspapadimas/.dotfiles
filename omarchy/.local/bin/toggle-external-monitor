@@ -1,18 +1,68 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DUAL_PROFILE="profile-20260824-105617"
-LAPTOP_PROFILE="laptop-only"
+OUTPUT="DP-1"
+SOCKET="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
 
-active_profile=$(hyprmoncfg status | awk -F': ' '/^Active profile:/ { print $2; exit }')
+monitor_json() {
+  hyprctl -j monitors all | jq -c --arg output "$OUTPUT" '.[] | select(.name == $output)'
+}
 
-if [[ "$active_profile" == "$LAPTOP_PROFILE" ]]; then
-  target="$DUAL_PROFILE"
-  message="External monitor enabled"
-else
-  target="$LAPTOP_PROFILE"
-  message="External monitor disabled"
-fi
+apply_correct_profile() {
+  local monitor mode position label
+  monitor=$(monitor_json)
+  [[ -n "$monitor" ]] || return 1
 
-hyprmoncfg apply "$target" --confirm-timeout 0
-notify-send "Display configuration" "$message"
+  if jq -e '.availableModes | any(startswith("3440x1440@144"))' <<<"$monitor" >/dev/null; then
+    # 120 Hz is more reliable than 144 Hz when the laptop retrains the
+    # DisplayPort link after AC power is connected.
+    mode="3440x1440@120"
+    position="1600x-300"
+    label="Xiaomi"
+  else
+    mode="1920x1080@60"
+    position="1600x0"
+    label="AOC"
+  fi
+
+  hyprctl eval "hl.monitor({ output = \"$OUTPUT\", mode = \"$mode\", position = \"$position\", scale = 1, disabled = false })" >/dev/null
+  printf '%s\n' "$label"
+}
+
+case "${1:-toggle}" in
+  enable)
+    apply_correct_profile >/dev/null
+    ;;
+  toggle)
+    monitor=$(monitor_json)
+    if [[ -z "$monitor" ]]; then
+      notify-send -u critical "Display configuration" "No external monitor is connected"
+      exit 1
+    fi
+
+    if [[ $(jq -r '.disabled' <<<"$monitor") == "true" ]]; then
+      label=$(apply_correct_profile)
+      notify-send "Display configuration" "$label monitor enabled"
+    else
+      hyprctl eval "hl.monitor({ output = \"$OUTPUT\", disabled = true })" >/dev/null
+      notify-send "Display configuration" "External monitor disabled"
+    fi
+    ;;
+  watch)
+    # Apply once at login, then select the right profile after every hot-plug.
+    sleep 1
+    apply_correct_profile >/dev/null || true
+    socat -U - "UNIX-CONNECT:$SOCKET" | while IFS= read -r event; do
+      case "$event" in
+        monitoradded*|monitorremoved*)
+          sleep 1
+          apply_correct_profile >/dev/null || true
+          ;;
+      esac
+    done
+    ;;
+  *)
+    echo "Usage: $0 [toggle|enable|watch]" >&2
+    exit 2
+    ;;
+esac

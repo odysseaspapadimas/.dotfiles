@@ -45,5 +45,5 @@ o.window({ class = "^org.quickshell$", title = "^Omarchy Spotify$" }, {
 -- Add any other personal Hyprland configuration below.
 -- o.window("qemu", { workspace = "5" })
 
--- Added by hyprmoncfg: its generated monitor rules load last, so nothing before this can override the applied layout.
-dofile(os.getenv("HOME") .. "/.config/hypr/hyprmoncfg-monitors.lua")
+-- hyprmoncfg override disabled; monitor layout is managed in hypr/monitors.lua.
+-- dofile(os.getenv("HOME") .. "/.config/hypr/hyprmoncfg-monitors.lua")

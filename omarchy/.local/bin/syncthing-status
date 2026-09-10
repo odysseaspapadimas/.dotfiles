@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Live, read-only Syncthing status for a short-lived terminal window."""
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from pathlib import Path
+
+CONFIGS = (
+    Path.home() / ".local/state/syncthing/config.xml",
+    Path.home() / ".config/syncthing/config.xml",
+)
+
+
+def format_size(value):
+    value = float(value or 0)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def load_config():
+    path = next((path for path in CONFIGS if path.exists()), None)
+    if not path:
+        raise RuntimeError("Syncthing config.xml was not found")
+    root = ET.parse(path).getroot()
+    gui = root.find("gui")
+    if gui is None or not gui.findtext("apikey"):
+        raise RuntimeError(f"No GUI API key in {path}")
+    address = (gui.findtext("address") or "127.0.0.1:8384").replace("0.0.0.0", "127.0.0.1")
+    scheme = "https" if gui.get("tls") == "true" else "http"
+    folders = [(node.get("id"), node.get("label") or node.get("id")) for node in root.findall("folder")]
+    devices = {node.get("id"): node.get("name") or node.get("id", "")[:7] for node in root.findall("device")}
+    return f"{scheme}://{address}", gui.findtext("apikey"), folders, devices
+
+
+def api_get(base, key, endpoint, **params):
+    url = f"{base}/rest/{endpoint}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"X-API-Key": key})
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.load(response)
+
+
+def build_report():
+    base, key, folders, device_names = load_config()
+    system = api_get(base, key, "system/status")
+    connections = api_get(base, key, "system/connections").get("connections", {})
+    rows = []
+    total_bytes = total_items = errors = 0
+    active = False
+
+    for folder_id, label in folders:
+        status = api_get(base, key, "db/status", folder=folder_id)
+        need_bytes = status.get("needBytes", 0)
+        need_files = status.get("needFiles", 0)
+        need_dirs = status.get("needDirectories", 0)
+        folder_errors = status.get("errors", 0) + status.get("pullErrors", 0)
+        state = status.get("state", "unknown")
+        total_bytes += need_bytes
+        total_items += need_files + need_dirs
+        errors += folder_errors
+        active = active or state not in ("idle", "unknown") or need_bytes > 0
+        remaining = "up to date" if not (need_bytes or need_files or need_dirs) else f"{format_size(need_bytes)}, {need_files} files, {need_dirs} dirs left"
+        warning = f", {folder_errors} errors" if folder_errors else ""
+        rows.append(f"  {label:<24} {state:<10} {remaining}{warning}")
+
+    connected = []
+    disconnected = []
+    for device_id, info in connections.items():
+        name = device_names.get(device_id, device_id[:7])
+        (connected if info.get("connected") else disconnected).append(name)
+
+    healthy = not errors and system.get("myID") and all(row[0] for row in folders)
+    if errors:
+        headline = f"ERRORS — {errors} folder errors"
+    elif active and (total_bytes or total_items):
+        headline = f"SYNCING — {format_size(total_bytes)}, {total_items} items left"
+    elif active:
+        headline = "WORKING — scanning for changes; nothing queued"
+    else:
+        headline = "HEALTHY — everything is up to date"
+
+    uptime = int(system.get("uptime", 0))
+    lines = [
+        "SYNCTHING STATUS",
+        "=" * 72,
+        headline,
+        f"Service: running  |  Uptime: {uptime // 86400}d {(uptime % 86400) // 3600}h  |  API: healthy" if healthy else "Service: running  |  API: healthy",
+        "",
+        "FOLDERS",
+        *rows,
+        "",
+        f"DEVICES  Connected: {', '.join(connected) or 'none'}",
+    ]
+    if disconnected:
+        lines.append(f"         Offline: {', '.join(disconnected)}")
+    lines += ["", f"Updated {datetime.now().strftime('%H:%M:%S')}  •  refreshes every 2s  •  Ctrl-C to close"]
+    return "\n".join(lines)
+
+
+def main():
+    while True:
+        try:
+            report = build_report()
+        except (RuntimeError, OSError, urllib.error.URLError, ET.ParseError) as error:
+            report = "SYNCTHING STATUS\n" + "=" * 72 + f"\nUNAVAILABLE — {error}\n\nCtrl-C to close"
+        sys.stdout.write("\033[2J\033[H" + report + "\n")
+        sys.stdout.flush()
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

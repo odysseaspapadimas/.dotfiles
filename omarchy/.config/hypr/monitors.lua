@@ -8,7 +8,18 @@ hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
 
 hl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = 1.6 })
-hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "1600x0", scale = 1 })
+-- Start with a universally safe mode; the hot-plug manager selects the
+-- Xiaomi 3440x1440@144 or AOC 1920x1080@60 profile automatically.
+hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "1600x0", scale = 1, disabled = false })
+
+-- Keep workspaces 1-3 and 7-10 on the external monitor;
+-- workspaces 4-6 stay on the laptop display.
+for _, workspace in ipairs({ "1", "2", "3", "7", "8", "9", "10" }) do
+  hl.workspace_rule({ workspace = workspace, monitor = "DP-1" })
+end
+for _, workspace in ipairs({ "4", "5", "6" }) do
+  hl.workspace_rule({ workspace = workspace, monitor = "eDP-1" })
+end
 
 -- Configure a specific monitor.
 -- hl.monitor({ output = "DP-2", mode = "2560x1440@144", position = "0x0", scale = 1 })
