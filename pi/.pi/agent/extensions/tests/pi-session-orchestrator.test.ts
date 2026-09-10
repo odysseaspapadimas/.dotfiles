@@ -15,6 +15,10 @@ process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS = "100";
 
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 const { default: orchestrator, parseModelOverride, sideSharedAgentDirectory } = await import("../pi-session-orchestrator.ts");
+const { SessionStore, textContent } = await import("../pi-sessions/store.ts");
+const { SessionMailbox, mailboxPending, sendMailbox } = await import("../pi-sessions/mailbox.ts");
+const { recall, conversationPage } = await import("../pi-sessions/recall.ts");
+const { runState } = await import("../pi-sessions/runs.ts");
 
 assert.deepEqual(parseModelOverride("openai-codex/gpt-5.6-luna"), {
   provider: "openai-codex",
@@ -36,11 +40,48 @@ interface Pane {
 }
 
 const panes = new Map<string, Pane>();
+const receivers = new Map<string, InstanceType<typeof SessionMailbox>>();
+const drafts = new Map<string, string>();
+let mailboxDeliveries = 0;
+
+async function startReceiver(path: string, pane: Pane) {
+  await receivers.get(pane.pane_id)?.close();
+  const sessionId = SessionManager.open(path).getSessionId();
+  const receiver = new SessionMailbox(join(agentDir, "pi-sessions-ipc"), { sessionId, sessionPath: path, paneId: pane.pane_id }, {
+    isCurrent: () => panes.get(pane.pane_id) === pane && pane.agent_session?.value === path,
+    isIdle: () => pane.agent_status === "idle" || pane.agent_status === "done",
+    hasPendingMessages: () => false,
+    findAccepted: (messageId) => {
+      for (const entry of SessionManager.open(path).getEntries()) {
+        if (entry.type !== "message" || entry.message.role !== "user") continue;
+        const content = textContent(entry.message.content);
+        if (content.startsWith(`[pi_sessions:${messageId}]\n`)) return { entryId: entry.id, content };
+      }
+    },
+    deliver: (content) => {
+      mailboxDeliveries++;
+      pane.agent_status = "working";
+      appendExchange(path, content);
+      pane.agent_status = "idle";
+    },
+    onError: (error) => { throw error; },
+  });
+  await receiver.start();
+  receivers.set(pane.pane_id, receiver);
+}
 let registered: any;
 const eventHandlers = new Map<string, (...args: any[]) => unknown>();
 let nextRuntime = 1;
 let acceptNextInitialPrompt = true;
+let failTabClose = false;
 const herdrCalls: string[][] = [];
+let settlingPath: string | undefined;
+
+function settle(path: string) {
+  settlingPath = path;
+  eventHandlers.get("agent_settled")?.({}, { sessionManager: SessionManager.open(path), isIdle: () => true });
+  settlingPath = undefined;
+}
 
 function output(result: unknown = {}) {
   return { code: 0, stdout: `${JSON.stringify({ result })}\n`, stderr: "", killed: false };
@@ -109,7 +150,7 @@ function appendExchange(path: string, prompt: string): void {
   manager.appendMessage({ role: "user", content: prompt, timestamp: Date.now() });
   manager.appendMessage({
     role: "assistant",
-    content: [{ type: "text", text: `reply: ${prompt}` }],
+    content: [{ type: "text", text: `reply: ${prompt.replace(/^\[pi_sessions:[^\]]+\]\n/u, "")}` }],
     provider: "test",
     model: "model",
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
@@ -127,6 +168,10 @@ const fakePi: any = {
   },
   getThinkingLevel() {
     return "medium";
+  },
+  appendEntry(type: string, data: unknown) {
+    assert.ok(settlingPath);
+    SessionManager.open(settlingPath).appendCustomEntry(type, data);
   },
   async exec(command: string, args: string[]) {
     assert.equal(command, "herdr");
@@ -162,6 +207,7 @@ const fakePi: any = {
         pane.agent = "pi";
         pane.agent_status = "idle";
         pane.agent_session = { kind: "path", value: match[1] };
+        await startReceiver(match[1], pane);
         const prompt = initialPrompt(text);
         if (prompt) {
           const accepted = acceptNextInitialPrompt;
@@ -175,20 +221,22 @@ const fakePi: any = {
       } else if (text.startsWith("/name ")) {
         SessionManager.open(pane.agent_session!.value).appendSessionInfo(text.slice(6));
       } else {
-        pane.agent_status = "working";
-        appendExchange(pane.agent_session!.value, text);
-        pane.agent_status = "idle";
+        throw new Error("Follow-ups must use the mailbox, never pane run / terminal input");
       }
       return output({});
     }
     if (args[0] === "pane" && args[1] === "get") return output({ pane: panes.get(args[2]) });
-    if (args[0] === "pane" && args[1] === "send-keys") return output({});
     if (args[0] === "pane" && args[1] === "close") {
+      await receivers.get(args[2])?.close();
       panes.delete(args[2]);
       return output({});
     }
     if (args[0] === "tab" && args[1] === "close") {
-      for (const [id, pane] of panes) if (pane.tab_id === args[2]) panes.delete(id);
+      if (failTabClose) return { code: 1, stdout: "", stderr: "cleanup unavailable", killed: false };
+      for (const [id, pane] of panes) if (pane.tab_id === args[2]) {
+        await receivers.get(id)?.close();
+        panes.delete(id);
+      }
       return output({});
     }
     if (args[0] === "tab" && (args[1] === "focus" || args[1] === "rename")) return output({});
@@ -229,6 +277,53 @@ try {
   await mkdir(dirname(externalPath), { recursive: true });
   await writeFile(externalPath, `${[external.getHeader(), ...external.getEntries()].map(JSON.stringify).join("\n")}\n`);
   appendExchange(externalPath, "ordinary session");
+
+  // Recall is local, dated, ranked and directly readable; it does not need a runtime.
+  const history = new SessionStore(join(agentDir, "sessions"));
+  const first = await history.load(externalPath);
+  assert.equal(await history.load(externalPath), first, "unchanged transcripts reuse their projection");
+  appendExchange(externalPath, "implemented piSession recall with cursor paging; next: investigate timeouts");
+  appendExchange(legacyPath, "cursor ".repeat(50)); // Repetition must lose to broader topic coverage.
+  assert.notEqual(await history.load(externalPath), first, "appends invalidate cached projections");
+  const callCount = herdrCalls.length;
+  result = await execute({ action: "recall", query: "pi_session cursor", cwd: root });
+  assert.equal(result.details.hits[0].session.sessionId, external.getSessionId());
+  assert.deepEqual(result.details.hits[0].matchedTerms.sort(), ["cursor", "pi", "session"]);
+  const evidence = result.details.hits[0].evidence[0];
+  result = await execute({ action: "read", id: externalPath, cursor: evidence.entryId, limit: 1 });
+  assert.match(result.content[0].text, /piSession recall/);
+  assert.equal(herdrCalls.length, callCount, "recall and path reads must not call Herdr");
+  const date = (await history.load(externalPath)).messages[0].timestamp;
+  const excluded = await recall(history, { query: "ordinary", before: date, limit: 10, offset: 0 });
+  assert.equal(excluded.total, 0, "recall bounds filter message dates, even when the file was just modified");
+  result = await execute({ action: "recall", after: "1d" });
+  assert.ok(result.details.hits.some((hit: any) => hit.session.sessionId === external.getSessionId()));
+  result = await execute({ action: "list", limit: 1 });
+  assert.equal(result.details.sessions.length, 1);
+  assert.equal(result.details.nextOffset, 1);
+
+  // A huge single message remains completely readable through character/line-bounded cursors.
+  const snapshot = await history.load(externalPath);
+  const huge = "🙂a\n".repeat(5000);
+  const oversized = { ...snapshot, messages: [{ id: "huge", role: "assistant" as const, timestamp: date, text: huge }] };
+  let cursor: string | undefined = "huge";
+  let restored = "";
+  do {
+    const page = conversationPage(oversized, 1, cursor);
+    assert.ok(Buffer.byteLength(page.text) < 32 * 1024);
+    assert.ok(page.text.split("\n").length < 1000);
+    restored += page.text.slice(page.text.indexOf("\n") + "\nAssistant: ".length);
+    assert.notEqual(page.nextCursor, cursor, "pagination must make progress");
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.equal(restored, huge);
+  assert.throws(() => conversationPage(oversized, 1, "missing"), /Unknown read cursor/);
+  const toolUse = { ...snapshot, settled: [], messages: snapshot.messages.map((entry) =>
+    entry.role === "assistant" ? { ...entry, stopReason: "toolUse" } : entry) };
+  assert.equal(runState(toolUse, "idle").outcome, undefined, "tool-use commentary is not completion");
+  const failed = { ...toolUse, messages: toolUse.messages.map((entry) => entry.role === "assistant" ? { ...entry, stopReason: "length" } : entry) };
+  assert.equal(runState(failed, "idle").outcome, "failed", "token-limit exits must not trigger successful task cleanup");
+
   result = await execute({ action: "list" });
   assert.match(result.content[0].text, new RegExp(`${external.getSessionId()}\\s+historical\\s+stopped`));
   result = await execute({ action: "list", cwd: root, updatedAfter: "1d" });
@@ -251,9 +346,54 @@ try {
   assert.match(result.content[0].text, /Origin: discovered/);
   await assert.rejects(
     execute({ action: "send", id: external.getSessionId(), message: "unsafe draft overwrite" }),
-    /cannot verify that its editor draft is empty/,
+    /Reload the TARGET session/,
   );
-  panes.delete("w-test:external");
+  const externalPane = panes.get("w-test:external")!;
+  drafts.set(externalPane.pane_id, "unfinished user draft — leave this alone");
+  await startReceiver(externalPath, externalPane);
+  result = await execute({ action: "send", id: externalPath, message: "safe discovered follow-up" });
+  assert.equal(result.details.messageAccepted, true);
+  const acceptedId = result.details.messageId;
+  const countAfterAccepted = mailboxDeliveries;
+  result = await execute({ action: "send", id: externalPath, message: "safe discovered follow-up", messageId: acceptedId });
+  assert.equal(result.details.delivery.state, "accepted");
+  assert.equal(mailboxDeliveries, countAfterAccepted, "retrying the same ID must not inject twice");
+  await assert.rejects(execute({ action: "send", id: externalPath, message: "different", messageId: acceptedId }), /different message/);
+
+  externalPane.agent_status = "working";
+  result = await execute({ action: "send", id: externalPath, message: "queued behind current run" });
+  assert.equal(result.details.messageAccepted, false);
+  assert.equal(result.details.delivery.state, "queued");
+  const queuedId = result.details.messageId;
+  result = await execute({ action: "send", id: externalPath, message: "queued behind current run", messageId: queuedId });
+  assert.equal(result.details.delivery.state, "queued", "a queued retry must not add a second request");
+  assert.equal(await mailboxPending(join(agentDir, "pi-sessions-ipc"), {
+    sessionId: external.getSessionId(), sessionPath: externalPath, paneId: externalPane.pane_id,
+  }), true, "queued messages must prevent automatic task cleanup");
+  result = await execute({ action: "status", id: externalPath, messageId: queuedId });
+  assert.equal(result.details.delivery.state, "queued");
+  assert.equal(result.details.outcome, undefined, "status must not report the previous run as this request's outcome");
+  result = await execute({ action: "watch", id: externalPath, messageId: queuedId, timeoutSeconds: 1 });
+  assert.equal(result.details.timedOut, true, "watch must not mistake the preceding run for this queued request");
+  assert.equal(mailboxDeliveries, countAfterAccepted);
+  externalPane.agent_status = "idle";
+  receivers.get(externalPane.pane_id)!.wake();
+  result = await execute({ action: "watch", id: externalPath, messageId: queuedId, timeoutSeconds: 1 });
+  assert.equal(result.details.outcome, "completed");
+  assert.match(result.details.latest.text, /queued behind current run/);
+  assert.equal(drafts.get(externalPane.pane_id), "unfinished user draft — leave this alone");
+
+  externalPane.agent_status = "working";
+  const staleId = (await execute({ action: "send", id: externalPath, message: "do not replay across reload" })).details.messageId;
+  await startReceiver(externalPath, externalPane); // New runtime generation, same session and pane.
+  await assert.rejects(execute({ action: "send", id: externalPath, message: "do not replay across reload", messageId: staleId }), /receiver restarted or changed/);
+  externalPane.agent_status = "idle";
+  assert.equal(mailboxDeliveries, countAfterAccepted + 1);
+  panes.set("w-test:sibling", { pane_id: "w-test:sibling", tab_id: "w-test:external-tab", workspace_id: "w-test" });
+  await execute({ action: "stop", id: external.getSessionId() });
+  assert.ok(panes.has("w-test:sibling"), "stopping an external session must preserve unrelated panes");
+  panes.delete("w-test:sibling");
+  await assert.rejects(execute({ action: "focus", id: externalPath }), /use resume first/);
   result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
   assert.match(result.content[0].text, /historical\/stopped/);
 
@@ -347,12 +487,12 @@ try {
   result = await execute({ action: "read", id: created.id });
   assert.match(result.content[0].text, /reply: follow up/);
 
-  eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(created.sessionPath) });
+  await eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(created.sessionPath) });
   await execute({ action: "rename", id: "self", name: "Self renamed" });
   result = await execute({ action: "status", id: "self" });
   assert.match(result.content[0].text, /\(Self renamed\)/);
   await assert.rejects(execute({ action: "send", id: "self", message: "loop" }), /current Pi session/);
-  eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(externalPath) });
+  await eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(externalPath) });
 
   await execute({ action: "rename", id: created.id, name: "Renamed" });
   result = await execute({ action: "status", id: "Renamed" });
@@ -401,6 +541,20 @@ try {
   assert.match(result.content[0].text, /Status: stopped/);
   resumedPane.agent_session = { kind: "path", value: created.sessionPath };
 
+  resumedPane.agent_status = "working";
+  const snapshotsBefore = herdrCalls.filter((args) => args[0] === "api").length;
+  result = await execute({ action: "watch", id: created.sessionPath, timeoutSeconds: 1 });
+  assert.equal(result.details.timedOut, true);
+  assert.equal(result.details.status, "working");
+  assert.ok(herdrCalls.filter((args) => args[0] === "api").length - snapshotsBefore <= 3,
+    "watch must not repeatedly discover the runtime while resolving the same target");
+  resumedPane.agent_status = "idle";
+  panes.set("w-test:duplicate", { ...resumedPane, pane_id: "w-test:duplicate" });
+  result = await execute({ action: "status", id: created.sessionPath });
+  assert.equal(result.details.status, "multiple", "two idle runtimes are still a duplicate-runtime conflict");
+  await assert.rejects(execute({ action: "send", id: created.sessionPath, message: "unsafe duplicate target" }), /multiple Herdr panes/);
+  panes.delete("w-test:duplicate");
+
   // Task sessions can override thinking and automatically close their Herdr tab while preserving history.
   const taskResult = await execute({
     action: "create",
@@ -414,6 +568,10 @@ try {
   assert.equal(task.lifecycle, "task");
   assert.equal(task.thinking, "high");
   assert.match(taskResult.content[0].text, /Lifecycle: task/);
+  settle(task.sessionPath);
+  settle(task.sessionPath); // Repeated lifecycle notifications must be idempotent.
+  assert.equal(SessionManager.open(task.sessionPath).getEntries().filter((entry: any) =>
+    entry.type === "custom" && entry.customType === "pi-session-run-settled").length, 1);
   await new Promise((resolve) => setTimeout(resolve, 1_200));
   assert.ok(SessionManager.open(task.sessionPath).getEntries().length > 0);
   assert.equal([...panes.values()].some((pane) => pane.agent_session?.value === task.sessionPath), false);
@@ -424,8 +582,61 @@ try {
   result = await execute({ action: "list" });
   assert.doesNotMatch(result.content[0].text, /Manual name/);
 
-  console.log("pi-session-orchestrator lifecycle tests passed");
+  // Cleanup errors must leave the task inspectable and never claim a successful closure.
+  failTabClose = true;
+  const cleanupTask = (await execute({ action: "create", name: "Cleanup failure", message: "done", lifecycle: "task" })).details.session;
+  result = await execute({ action: "watch", id: cleanupTask.sessionPath, timeoutSeconds: 1 });
+  assert.equal(result.details.outcome, "completed");
+  assert.equal(result.details.cleanedUp, false);
+  assert.match(result.details.cleanupError, /cleanup unavailable/);
+  assert.ok([...panes.values()].some((pane) => pane.agent_session?.value === cleanupTask.sessionPath));
+  failTabClose = false;
+  await execute({ action: "stop", id: cleanupTask.sessionPath });
+
+  // A fresh orchestrator still sees durable completion after automatic runtime cleanup.
+  await eventHandlers.get("session_shutdown")?.({});
+  orchestrator(fakePi);
+  result = await execute({ action: "watch", id: task.sessionPath, timeoutSeconds: 1 });
+  assert.equal(result.details.outcome, "completed");
+  assert.equal(result.details.cleanedUp, false, "already-closed tasks must not claim another tab closure");
+  // Exercise the real extension binding: direct Pi API, explicit no-template expansion,
+  // no editor access, and a stale session context cannot receive another prompt.
+  const bindingEvents = new Map<string, (...args: any[]) => unknown>();
+  const bindingContext = {
+    mode: "tui", sessionManager: SessionManager.open(externalPath),
+    isIdle: () => true, hasPendingMessages: () => false,
+    ui: { notify: () => {}, setEditorText: () => { throw new Error("draft touched"); } },
+  };
+  let apiDeliveries = 0;
+  orchestrator({ ...fakePi,
+    on: (name: string, handler: (...args: any[]) => unknown) => bindingEvents.set(name, handler),
+    registerTool: () => {},
+    sendUserMessage: (content: string, options: unknown) => {
+      apiDeliveries++;
+      assert.deepEqual(options, { deliverAs: "followUp", expandPromptTemplates: false });
+      bindingContext.sessionManager.appendMessage({ role: "user", content, timestamp: Date.now() });
+    },
+  });
+  const previousPaneId = process.env.HERDR_PANE_ID;
+  process.env.HERDR_PANE_ID = "w-test:binding";
+  try {
+    await bindingEvents.get("session_start")!({}, bindingContext);
+    const identity = { sessionId: external.getSessionId(), sessionPath: externalPath, paneId: "w-test:binding" };
+    const delivered = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "/literal-not-a-command");
+    assert.equal(delivered.state, "accepted");
+    assert.equal(apiDeliveries, 1);
+    bindingContext.sessionManager = SessionManager.open(legacyPath);
+    await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "wrong session"), /Mailbox target changed/);
+    assert.equal(apiDeliveries, 1);
+  } finally {
+    await bindingEvents.get("session_shutdown")!({});
+    if (previousPaneId === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = previousPaneId;
+  }
+  console.log("pi-session-orchestrator lifecycle, recall, and mailbox tests passed");
 } finally {
+  await eventHandlers.get("session_shutdown")?.({});
+  await Promise.all([...receivers.values()].map((receiver) => receiver.close()));
   await rm(root, { recursive: true, force: true });
 }
 }

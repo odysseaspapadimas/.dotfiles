@@ -1,3 +1,6 @@
+-- Show the preview URL as a fallback when no graphical browser can be opened.
+vim.g.mkdp_echo_preview_url = 1
+
 local specs = {
   { src = "https://github.com/catppuccin/nvim", name = "catppuccin" },
   { src = "https://github.com/nvim-mini/mini.nvim", version = "stable" },
@@ -16,6 +19,7 @@ local specs = {
     version = vim.version.range("1"),
   },
   { src = "https://github.com/stevearc/conform.nvim" },
+  { src = "https://github.com/iamcco/markdown-preview.nvim" },
 }
 
 vim.pack.add(specs)

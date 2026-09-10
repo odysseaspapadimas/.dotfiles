@@ -4,6 +4,7 @@ set -euo pipefail
 
 PORTD_STATUS_URL=${PORTD_STATUS_URL:-http://127.0.0.1:43117/api/status}
 DEFAULT_REVERSE_PORTS=${REMOTE_ADB_REVERSE_PORTS:-"8081 8000"}
+export ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
 
 usage() {
   cat <<'EOF'
@@ -42,14 +43,13 @@ import json, os, sys
 status = json.loads(os.environ["STATUS_JSON"])
 active = any(
     item.get("remote_port") == 5037
-    and item.get("local_port") == 5037
     and item.get("state") == "active"
     for item in status.get("reverse_tunnels", [])
 )
 sys.exit(0 if status.get("connected") and active else 1)
 PY
   then
-    echo "remote-adb: portd's Ubuntu 5037 -> Mac 5037 mapping is not active" >&2
+    echo "remote-adb: portd's Ubuntu 5037 -> Mac ADB mapping is not active" >&2
     echo "remote-adb: enable it in ports view 2; refusing to start a local server" >&2
     return 1
   fi
@@ -147,7 +147,7 @@ shift
 case $command in
   doctor)
     require_tunnel
-    echo "portd: Ubuntu 127.0.0.1:5037 -> Mac 127.0.0.1:5037 is active"
+    echo "portd: Ubuntu 127.0.0.1:5037 -> Mac ADB is active"
     adb devices -l
     ;;
   devices)

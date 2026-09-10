@@ -36,6 +36,10 @@ map("n", "<leader>bn", "<cmd>enew<CR>", "New buffer")
 map("n", "<leader>bb", "<C-^>", "Alternate buffer")
 map("n", "<leader>rr", reload_config, "Reload Neovim config")
 map("n", "<leader>uw", "<cmd>set wrap!<CR>", "Toggle line wrap")
+vim.keymap.set("n", "<leader>mp", "<cmd>MarkdownPreviewToggle<CR>", {
+  silent = false,
+  desc = "Toggle Markdown preview",
+})
 map("n", "[b", "<cmd>bprevious<CR>", "Previous buffer")
 map("n", "]b", "<cmd>bnext<CR>", "Next buffer")
 map("n", "[q", "<cmd>cprevious<CR>", "Previous quickfix item")
