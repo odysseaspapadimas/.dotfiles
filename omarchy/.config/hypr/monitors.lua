@@ -10,7 +10,11 @@ hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy
 hl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = 1.6 })
 -- Start with a universally safe mode; the hot-plug manager selects the
 -- Xiaomi 3440x1440@144 or AOC 1920x1080@60 profile automatically.
-hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "1600x0", scale = 1, disabled = false })
+-- Preserve the manual toggle across config reloads, until enabled or logout.
+local disabled_file = io.open(os.getenv("XDG_RUNTIME_DIR") .. "/external-monitor-disabled", "r")
+local external_disabled = disabled_file ~= nil
+if disabled_file then disabled_file:close() end
+hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "1600x0", scale = 1, disabled = external_disabled })
 
 -- Keep workspaces 1-3 and 7-10 on the external monitor;
 -- workspaces 4-6 stay on the laptop display.

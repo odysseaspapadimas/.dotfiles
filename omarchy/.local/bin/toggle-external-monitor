@@ -3,20 +3,28 @@ set -euo pipefail
 
 OUTPUT="DP-1"
 SOCKET="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+DISABLED_FILE="$XDG_RUNTIME_DIR/external-monitor-disabled"
+
+# Serialize watcher updates with manual changes (including the state write).
+exec 9>"$XDG_RUNTIME_DIR/external-monitor.lock"
 
 monitor_json() {
   hyprctl -j monitors all | jq -c --arg output "$OUTPUT" '.[] | select(.name == $output)'
 }
 
 apply_correct_profile() {
+  if [[ -e "$DISABLED_FILE" ]]; then
+    hyprctl eval "hl.monitor({ output = \"$OUTPUT\", disabled = true })" >/dev/null
+    return 0
+  fi
   local monitor mode position label
   monitor=$(monitor_json)
   [[ -n "$monitor" ]] || return 1
 
   if jq -e '.availableModes | any(startswith("3440x1440@144"))' <<<"$monitor" >/dev/null; then
-    # 120 Hz is more reliable than 144 Hz when the laptop retrains the
-    # DisplayPort link after AC power is connected.
-    mode="3440x1440@120"
+    # This DisplayPort link is unstable above 60 Hz, especially after AC
+    # power changes, so use the reliable full-resolution mode.
+    mode="3440x1440@60"
     position="1600x-300"
     label="Xiaomi"
   else
@@ -31,9 +39,12 @@ apply_correct_profile() {
 
 case "${1:-toggle}" in
   enable)
+    flock 9
+    rm -f "$DISABLED_FILE"
     apply_correct_profile >/dev/null
     ;;
   toggle)
+    flock 9
     monitor=$(monitor_json)
     if [[ -z "$monitor" ]]; then
       notify-send -u critical "Display configuration" "No external monitor is connected"
@@ -41,9 +52,11 @@ case "${1:-toggle}" in
     fi
 
     if [[ $(jq -r '.disabled' <<<"$monitor") == "true" ]]; then
+      rm -f "$DISABLED_FILE"
       label=$(apply_correct_profile)
       notify-send "Display configuration" "$label monitor enabled"
     else
+      touch "$DISABLED_FILE"
       hyprctl eval "hl.monitor({ output = \"$OUTPUT\", disabled = true })" >/dev/null
       notify-send "Display configuration" "External monitor disabled"
     fi
@@ -51,12 +64,16 @@ case "${1:-toggle}" in
   watch)
     # Apply once at login, then select the right profile after every hot-plug.
     sleep 1
+    flock 9
     apply_correct_profile >/dev/null || true
+    flock -u 9
     socat -U - "UNIX-CONNECT:$SOCKET" | while IFS= read -r event; do
       case "$event" in
-        monitoradded*|monitorremoved*)
+        monitoradded*|monitorremoved*|configreloaded*)
           sleep 1
+          flock 9
           apply_correct_profile >/dev/null || true
+          flock -u 9
           ;;
       esac
     done
