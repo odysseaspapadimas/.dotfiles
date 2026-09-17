@@ -2,10 +2,11 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=8
+// HERDR_INTEGRATION_VERSION=9
 // @ts-nocheck
 
 import net from "node:net";
+import path from "node:path";
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -74,7 +75,10 @@ function updateSessionRef(ctx: any): void {
   try {
     const file = ctx?.sessionManager?.getSessionFile?.();
     currentAgentSessionPath =
-      typeof file === "string" && file.startsWith("/") ? file : undefined;
+      typeof file === "string" &&
+      (path.posix.isAbsolute(file) || path.win32.isAbsolute(file))
+        ? file
+        : undefined;
   } catch {
     currentAgentSessionPath = undefined;
   }
@@ -203,15 +207,6 @@ export default function (pi) {
     lastMessage = next.message;
     queueState(next.state, next.message);
   }
-
-  // rpiv-ask-user-question publishes a stable package event; translate it to
-  // the generic event consumed by the Herdr integration.
-  pi.events.on("rpiv:ask-user:blocked", (data) => {
-    pi.events.emit("herdr:blocked", {
-      active: data?.active === true,
-      label: "Needs input",
-    });
-  });
 
   pi.events.on("herdr:blocked", (data) => {
     if (!rootSession) {

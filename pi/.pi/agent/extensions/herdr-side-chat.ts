@@ -73,7 +73,16 @@ async function prepareSideAgentDirectory(): Promise<void> {
   // file so quiet startup does not alter the main Pi experience.
   const entries = await readdir(SHARED_AGENT_DIR, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === "settings.json" || entry.name === "sessions" || entry.name === "herdr-side-chat") continue;
+    // These paths are written by the side Pi itself and must remain local. In
+    // particular, web search creates its cache directory lazily; trying to
+    // replace that real directory with a shared symlink on the next /side open
+    // would otherwise be reported as an unexpected runtime entry.
+    if (
+      entry.name === "settings.json" ||
+      entry.name === "sessions" ||
+      entry.name === "herdr-side-chat" ||
+      entry.name === "web-search-cache"
+    ) continue;
     const source = join(SHARED_AGENT_DIR, entry.name);
     const target = join(SIDE_AGENT_DIR, entry.name);
     try {
