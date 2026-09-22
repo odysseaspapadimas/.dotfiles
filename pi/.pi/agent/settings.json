@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.85.1",
+  "lastChangelogVersion": "0.87.0",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "low",
@@ -8,10 +8,7 @@
   "packages": [
     "npm:pi-token-speed",
     "npm:@juicesharp/rpiv-ask-user-question",
-    {
-      "source": "npm:pi-mcp-adapter",
-      "extensions": []
-    },
+    "npm:pi-mcp-adapter",
     "npm:pi-web-access",
     "npm:pi-context-usage",
     "npm:@juicesharp/rpiv-todo",

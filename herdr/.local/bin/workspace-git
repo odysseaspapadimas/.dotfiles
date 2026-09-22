@@ -181,6 +181,8 @@ def choose(stdscr: curses.window, workspace: Path, repositories: list[Repository
         else:
             visible_height = height - 3
             start = min(max(0, selected - visible_height + 1), max(0, len(repositories) - visible_height))
+            name_width = max(24, *(len(item.root.name) for item in repositories))
+            branch_width = max(18, *(len(item.branch) for item in repositories))
             for row, repository in enumerate(repositories[start : start + visible_height], start=1):
                 index = start + row - 1
                 marker = "›" if index == selected else " "
@@ -193,7 +195,7 @@ def choose(stdscr: curses.window, workspace: Path, repositories: list[Repository
                     base_color = curses.color_pair(3)
                 else:
                     base_color = curses.color_pair(2)
-                prefix = f"{marker} {state} {repository.root.name:<24} {repository.branch:<18} "
+                prefix = f"{marker} {state} {repository.root.name:<{name_width}} {repository.branch:<{branch_width}} "
                 columns = [
                     (prefix, selected_attr | base_color),
                     (f"+{repository.additions:<6}", selected_attr | curses.color_pair(2) | curses.A_BOLD),

@@ -1,0 +1,31 @@
+id = "odysseas.numbered-tabs"
+name = "Numbered Tabs"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Prefix Pi tab labels with their current visual position without touching service tabs."
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["python3", "numbered_tabs.py", "sync"]
+
+[[actions]]
+id = "sync"
+title = "Synchronize numbered tab labels"
+contexts = ["workspace"]
+command = ["python3", "numbered_tabs.py", "sync"]
+
+[[events]]
+on = "tab.created"
+command = ["python3", "numbered_tabs.py", "sync"]
+
+[[events]]
+on = "tab.closed"
+command = ["python3", "numbered_tabs.py", "sync"]
+
+[[events]]
+on = "tab.moved"
+command = ["python3", "numbered_tabs.py", "sync"]
+
+[[events]]
+on = "tab.renamed"
+command = ["python3", "numbered_tabs.py", "sync"]

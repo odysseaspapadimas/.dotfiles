@@ -2,15 +2,19 @@
  * Auto Session Setup Extension
  *
  * On the first user message:
- * 1. Uses deepseek-v4-flash to generate a concise session name
- * 2. Sets the pi session name
- * 3. Sets the cmux terminal tab title to match
+ * 1. Uses deepseek-v4.1-flash to generate a concise session name
+ * 2. Sets the Pi session name
+ * 3. Updates the terminal title and current Herdr tab label
  */
 
 import type { ExtensionAPI, Model } from "@earendil-works/pi-coding-agent";
-import { completeSimple, type Api, type TextContent } from "@earendil-works/pi-ai";
+import type { Api, TextContent } from "@earendil-works/pi-ai";
 
 export default function (pi: ExtensionAPI) {
+	// A side chat is a split pane inside its source tab. It must not rename the
+	// shared tab, terminal title, or its ephemeral Pi session from a side prompt.
+	if (process.env.PI_HERDR_SIDE === "1") return;
+
 	let isFirstMessage = true;
 	let targetModel: Model<Api> | undefined;
 
@@ -24,6 +28,15 @@ export default function (pi: ExtensionAPI) {
 			process.stdout.write(`\x1b]0;${title}\x07`);
 		} catch {
 			// Silently ignore if stdout is not writable
+		}
+	}
+
+	async function setHerdrTabName(name: string): Promise<void> {
+		const tabId = process.env.HERDR_TAB_ID;
+		if (process.env.HERDR_ENV !== "1" || !tabId) return;
+		const result = await pi.exec("herdr", ["tab", "rename", tabId, name], { timeout: 5_000 });
+		if (result.code !== 0) {
+			throw new Error(result.stderr.trim() || result.stdout.trim() || "Herdr tab rename failed");
 		}
 	}
 
@@ -43,21 +56,13 @@ export default function (pi: ExtensionAPI) {
 			.some((entry) => entry.type === "message" && entry.message.role === "user");
 		isFirstMessage = !hasExistingName && !hasUserMessages;
 
-		// Find deepseek-v4-flash — used only for generating the session name
-		targetModel = ctx.modelRegistry.find("opencode-go", "deepseek-v4-flash");
-
-		// Fallback: search across all providers
+		// Use the latest DeepSeek Flash model only; a missing model should be visible
+		// rather than silently selecting an unrelated DeepSeek variant.
+		targetModel = ctx.modelRegistry.find("opencode-go", "deepseek-v4.1-flash");
 		if (!targetModel) {
 			targetModel = ctx.modelRegistry
 				.getAll()
-				.find((m) => m.id === "deepseek-v4-flash");
-		}
-
-		// If still not found, try any deepseek model as fallback
-		if (!targetModel) {
-			targetModel = ctx.modelRegistry
-				.getAll()
-				.find((m) => m.id.toLowerCase().includes("deepseek"));
+				.find((m) => m.id === "deepseek-v4.1-flash");
 		}
 	});
 
@@ -73,29 +78,34 @@ export default function (pi: ExtensionAPI) {
 		const tempName = userMessage.split("\n")[0].trim().slice(0, 60);
 		pi.setSessionName(tempName);
 		setTabTitle(`${tempName} — pi`);
+		void setHerdrTabName(tempName).catch((error) => {
+			ctx.ui.notify(`Could not rename Herdr tab: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		});
 
 		// Fire off the model call in the background — don't block the agent
 		if (targetModel) {
 			ctx.modelRegistry
-				.getApiKeyAndHeaders(targetModel)
-				.then((auth) => {
-					if (!auth.ok) return;
-					return completeSimple(
-						targetModel!,
-						{
-							systemPrompt:
-								"Generate a very short session name (max 60 chars) that summarizes the user's goal from their first message. "
-								+ "Output ONLY the name — no quotes, no labels, no explanation, no punctuation.",
-							messages: [
-								{
-									role: "user",
-									content: [{ type: "text", text: userMessage }],
-								},
-							],
-						},
-						{ apiKey: auth.apiKey, maxTokens: 30 },
-					);
-				})
+				.complete(
+					targetModel,
+					{
+						systemPrompt:
+							"Generate a very short session name (max 60 chars) that summarizes the user's goal from their first message. "
+							+ "Output ONLY the name — no quotes, no labels, no explanation, no punctuation.",
+						messages: [
+							{
+								role: "user",
+								content: [{ type: "text", text: userMessage }],
+								timestamp: Date.now(),
+							},
+						],
+					},
+					// Console Go requires this routing header for nested model calls.
+					{
+						maxTokens: 2_048,
+						reasoning: "low",
+						headers: { "x-opencode-session": ctx.sessionManager.getSessionId() },
+					},
+				)
 				.then((result) => {
 					if (!result) return;
 					const text = result.content
@@ -104,18 +114,29 @@ export default function (pi: ExtensionAPI) {
 						.join("")
 						.trim();
 
-					if (!text) return;
+					if (result.stopReason === "error") {
+						throw new Error(result.errorMessage || "model request failed");
+					}
+					if (!text) {
+						throw new Error(`model returned no visible text (stop reason: ${result.stopReason})`);
+					}
 
 					let name = text.replace(/^["'\u201C\u201D]+|["'\u201C\u201D]+$/g, "").trim();
 					if (name.length > 60) name = name.slice(0, 57) + "...";
 
-					// Update the session name and tab title with the model-generated name
+					// Update the session name and titles with the model-generated name.
 					pi.setSessionName(name);
 					setTabTitle(`${name} — pi`);
+					return setHerdrTabName(name);
 				})
-				.catch(() => {
-					// Model call failed — keep the temporary name, it's fine
+				.catch((error) => {
+					ctx.ui.notify(
+						`Session naming with deepseek-v4.1-flash failed; keeping the prompt fallback: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
 				});
+		} else {
+			ctx.ui.notify("deepseek-v4.1-flash is unavailable; keeping the prompt fallback name", "warning");
 		}
 	});
 }
