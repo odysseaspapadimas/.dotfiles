@@ -1,14 +1,14 @@
 {
-  "lastChangelogVersion": "0.87.0",
+  "lastChangelogVersion": "0.87.1",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultModel": "gpt-6-sol",
   "defaultThinkingLevel": "low",
   "hideThinkingBlock": false,
   "theme": "catppuccin-mocha",
   "packages": [
     "npm:pi-token-speed",
     "npm:@juicesharp/rpiv-ask-user-question",
-    "npm:pi-mcp-adapter",
+    "/home/odysseas/.dotfiles/pi/.pi/agent/packages/pi-mcp",
     "npm:pi-web-access",
     "npm:pi-context-usage",
     "npm:@juicesharp/rpiv-todo",

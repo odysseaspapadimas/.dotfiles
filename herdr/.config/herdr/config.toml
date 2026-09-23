@@ -123,10 +123,10 @@ description = "Git status and history"
 [[keys.command]]
 key = "prefix+d"
 type = "popup"
-command = "/bin/sh \"$HOME/.config/herdr/popup-env\" drop"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" /bin/sh \"$HOME/.local/bin/herdr-drop\""
 width = "90%"
 height = "90%"
-description = "upload files"
+description = "transfer files with Omarchy"
 
 [[keys.command]]
 key = "prefix+comma"

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Connect the Herdr popup to the Omarchy client's dropd reverse tunnel.
+set -eu
+secret="$HOME/.config/drop-rs/omarchy-token"
+if [ ! -r "$secret" ]; then
+    printf '%s\n' 'Missing drop token. Set up the Omarchy dropd service first.' >&2
+    exit 1
+fi
+IFS= read -r DROP_TOKEN < "$secret"
+export DROP_TOKEN
+exec drop --server http://127.0.0.1:8766

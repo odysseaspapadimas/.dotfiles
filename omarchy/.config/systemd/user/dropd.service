@@ -1,0 +1,13 @@
+[Unit]
+Description=Serve Omarchy files to Herdr drop
+
+[Service]
+EnvironmentFile=%h/.config/drop-rs/service.env
+# dropd prints its bearer token on stdout; never write it to the journal.
+StandardOutput=null
+ExecStart=%h/.local/bin/dropd %h --port 8766
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
