@@ -668,7 +668,7 @@ impl App {
             } else {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('s') => self.searching = true,
+                    KeyCode::Char('/') => self.searching = true,
                     KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
                     KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
                     KeyCode::Char('o') => {
@@ -784,7 +784,7 @@ impl App {
         let help = if self.searching {
             "type to filter  ↑/↓ move  Enter start  Esc browse"
         } else {
-            "j/k move  s search  o order  Enter start  f focus  r restart  x stop  q quit"
+            "j/k move  / search  o order  Enter start  f focus  r restart  x stop  q quit"
         };
         frame.render_widget(
             Paragraph::new(format!("{help}    {}", self.message)),
