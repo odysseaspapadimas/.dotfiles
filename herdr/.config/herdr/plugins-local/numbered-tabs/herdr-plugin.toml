@@ -20,7 +20,11 @@ command = ["python3", "numbered_tabs.py", "sync"]
 
 [[events]]
 on = "tab.closed"
-command = ["python3", "numbered_tabs.py", "sync"]
+command = ["python3", "numbered_tabs.py", "sync-delayed"]
+
+[[events]]
+on = "pane.closed"
+command = ["python3", "numbered_tabs.py", "sync-delayed"]
 
 [[events]]
 on = "tab.moved"

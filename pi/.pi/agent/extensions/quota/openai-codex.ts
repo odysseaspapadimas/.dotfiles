@@ -11,7 +11,7 @@
  * Codex CLI is already logged in.
  *
  * Commands:
- *   /codex-quota          Show detailed quota
+ *   /codex-quota          Show detailed quota and a flexible weekly pacing table
  *   /codex-quota refresh  Bypass cache
  *   /codex-quota json     Show normalized JSON
  */
@@ -202,8 +202,8 @@ async function fetchCodexUsage(force = false, signal?: AbortSignal): Promise<Cod
 	}
 }
 
-function formatReset(resetAt: number): string {
-	const sec = Math.max(0, resetAt - Math.floor(Date.now() / 1000));
+function formatReset(resetAt: number, nowSeconds = Math.floor(Date.now() / 1000)): string {
+	const sec = Math.max(0, resetAt - nowSeconds);
 	const days = Math.floor(sec / 86400);
 	const hours = Math.floor((sec % 86400) / 3600);
 	const mins = Math.floor((sec % 3600) / 60);
@@ -272,18 +272,82 @@ function nextLocalBoundarySeconds(unitName: "day" | "hour", now: Date): number {
 	return Math.floor(boundary.getTime() / 1000);
 }
 
-function detailText(result: CodexUsageResult): string {
+export function weeklyPlan(w: UsageWindow, now: Date): string[] {
+	const nowMs = now.getTime();
+	const resetMs = w.resetAt * 1000;
+	if (resetMs <= nowMs) return ["  Weekly plan: reset is due now."];
+
+	type Slot = { label: string; kind: "work" | "flex"; hours: number; reserve: number; checkpoint: number };
+	const slots: Slot[] = [];
+	const day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+	// A seven-day window can touch eight calendar dates. Use local days (including DST changes).
+	for (let i = 0; i < 8 && day.getTime() < resetMs; i++) {
+		const nextDay = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);
+		const label = day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+		const addSlot = (suffix: string, kind: Slot["kind"], start: number, end: number, fullHours: number) => {
+			const from = Math.max(start, nowMs);
+			const until = Math.min(end, resetMs);
+			if (until <= from) return;
+			const hours = (until - from) / 3_600_000;
+			slots.push({ label: `${label}${suffix}`, kind, hours, reserve: kind === "flex" ? 10 * hours / fullHours : 0, checkpoint: until / 1000 });
+		};
+		if (day.getDay() === 0 || day.getDay() === 6) {
+			addSlot("", "flex", day.getTime(), nextDay.getTime(), (nextDay.getTime() - day.getTime()) / 3_600_000);
+		} else {
+			const workStart = new Date(day);
+			workStart.setHours(10, 0, 0, 0);
+			const workEnd = new Date(day);
+			workEnd.setHours(18, 0, 0, 0);
+			addSlot("", "work", workStart.getTime(), workEnd.getTime(), 8);
+			if (day.getDay() === 5) addSlot(" eve", "flex", workEnd.getTime(), nextDay.getTime(), (nextDay.getTime() - workEnd.getTime()) / 3_600_000);
+		}
+		day.setDate(day.getDate() + 1);
+	}
+
+	const lines = [
+		"  Weekly plan (soft guides, not limits):",
+		"  Weekdays weighted by 10:00–18:00 work hours.",
+		"  ~10 points for Friday evening and each weekend day (optional).",
+		"  Period             Hours    Add    Used    Left   Reset in",
+		`  ${"Now".padEnd(19)}${"—".padStart(5)}      — ${`${pct(w.usedPercent)}%`.padStart(7)} ${`${pct(w.leftPercent)}%`.padStart(7)} ${formatReset(w.resetAt, Math.floor(nowMs / 1000)).padStart(10)}`,
+	];
+	const workHours = slots.filter((slot) => slot.kind === "work").reduce((sum, slot) => sum + slot.hours, 0);
+	const reserved = slots.reduce((sum, slot) => sum + slot.reserve, 0);
+	if (!slots.length) {
+		lines.push(`  No planned hours left; ${pct(w.leftPercent)}% remains usable until reset.`);
+		return lines;
+	}
+
+	// Keep the optional evening/weekend share, then spread the rest across remaining work hours.
+	// If no work hours remain, the remaining allowance flows into the optional slots.
+	const flexBudget = workHours > 0 ? Math.min(w.leftPercent, reserved) : w.leftPercent;
+	let accumulated = 0;
+	for (const slot of slots) {
+		const addition = slot.kind === "work"
+			? (w.leftPercent - flexBudget) * slot.hours / workHours
+			: (reserved > 0 ? flexBudget * slot.reserve / reserved : 0);
+		accumulated += addition;
+		const target = Math.min(100, w.usedPercent + accumulated);
+		lines.push(`  ${slot.label.padEnd(19)}${`${pct(slot.hours)}h`.padStart(5)} ${`+${pct(addition)}%`.padStart(6)} ${`${pct(target)}%`.padStart(7)} ${`${pct(Math.max(0, 100 - target))}%`.padStart(7)} ${formatReset(w.resetAt, Math.floor(slot.checkpoint)).padStart(10)}`);
+	}
+	lines.push("  Hours = available time, not required work. Targets are flexible; no 18:00 deadline.");
+	return lines;
+}
+
+export function detailText(result: CodexUsageResult, now = new Date()): string {
 	const lines: string[] = [];
 	if (result.planType) lines.push(`  Plan:        ${result.planType}`);
 	for (const w of [result.primary, result.secondary, result.codeReview].filter(Boolean) as UsageWindow[]) {
 		lines.push(`  ${w.label.padEnd(11)} ${pct(w.usedPercent).padStart(5)}% used, ${pct(w.leftPercent)}% left (resets in ${formatReset(w.resetAt)})`);
-		const pace = paceInfo(w);
+		const isWeeklyQuota = (w === result.primary || w === result.secondary) && w.windowSeconds >= 6 * 86400;
+		const pace = isWeeklyQuota ? undefined : paceInfo(w);
 		if (pace) {
 			const avg = pace.usedAverage === undefined ? "—" : `${pct(pace.usedAverage)}%/${pace.unitName}`;
 			const now = pace.useFromNow === undefined ? "—" : `${pct(pace.useFromNow)}%/${pace.unitName}`;
 			lines.push(`              pace: fresh ${pct(pace.freshBudget)}%/${pace.unitName}, avg ${avg}, now ${now}`);
 			lines.push(`              ${pace.boundaryName}: +${pct(pace.leftThisUnit)}% more -> target ${pct(pace.currentUnitTarget)}% used ${pace.targetSuffix}`);
 		}
+		if (isWeeklyQuota) lines.push(...weeklyPlan(w, now));
 	}
 	if (result.credits?.hasCredits) {
 		const bal = typeof result.credits.balance === "number" ? result.credits.balance.toFixed(2) : "unknown";

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +95,20 @@ def sync_workspace(workspace_id: str) -> None:
 
 
 def main() -> None:
-    if sys.argv[1:] != ["sync"]:
+    if sys.argv[1:] == ["sync-delayed"]:
+        # Close hooks can run before the tab list reflects the removal. Run
+        # again after the hook returns so the surviving tabs get renumbered.
+        subprocess.Popen(
+            [sys.executable, __file__, "sync-after-close"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return
+    if sys.argv[1:] == ["sync-after-close"]:
+        time.sleep(0.25)
+    elif sys.argv[1:] != ["sync"]:
         raise SystemExit("usage: numbered_tabs.py sync")
 
     state_dir = Path(os.environ.get("HERDR_PLUGIN_STATE_DIR", "/tmp"))
