@@ -14,6 +14,10 @@ Each canonical project root has a persistent `mini.sessions` session under Neovi
 - `Space f s` / `Space f S`: document/workspace symbols
 - `Space e`: toggle Neo-tree
 - `Space g s`: Git-status tree; multi-repository workspaces first prompt for a repository
+- `Space g w`: pick a Git worktree branch and open its editor in the same Herdr workspace
+- `Space g W`: pick a Git worktree branch and open a shell tab for agents
+
+See [worktree navigation and env preflight](../herdr/docs/worktree-navigation.md) for the one-workspace workflow and legacy-branch limitations.
 - `Space b b` (or `Ctrl+^`): switch to the alternate/previous file
 - `[b` / `]b`: previous/next buffer in the buffer list
 - `Space b n`: create a new empty buffer

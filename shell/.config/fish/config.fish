@@ -30,6 +30,8 @@ if status is-interactive
     command -q mise; and mise activate fish | source
     command -q zoxide; and zoxide init fish --cmd cd | source
     command -q starship; and starship init fish | source
+    # Herdr launches agents from interactive Fish panes; load approved checkout env first.
+    command -q direnv; and direnv hook fish | source
 
     if command -q eza
         alias ls='eza -lh --group-directories-first --icons=auto'

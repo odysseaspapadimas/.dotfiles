@@ -58,6 +58,39 @@ def project_root(start: Path) -> Path:
     return start
 
 
+def checkout_in_repository(source_root: Path, requested: Path) -> tuple[Path, str]:
+    """Accept only an existing Git checkout listed by the invoking repository."""
+    requested = requested.resolve()
+    if not requested.is_dir() or project_root(requested) != requested:
+        raise EditorError("selected checkout is not a Git worktree root")
+    listed = command(["git", "-C", str(source_root), "worktree", "list", "--porcelain"], timeout=5)
+    if listed.returncode != 0:
+        raise EditorError("could not list worktrees for the current repository")
+    for block in listed.stdout.split("\n\n"):
+        lines = block.splitlines()
+        if not lines or not lines[0].startswith("worktree ") or "prunable" in lines:
+            continue
+        if Path(lines[0][9:]).resolve() == requested:
+            branch = next((line[18:] for line in lines if line.startswith("branch refs/heads/")), "detached")
+            return requested, branch
+    raise EditorError("selected checkout is not a worktree of this repository")
+
+
+def checkout_env_preflight(root: Path, source_root: Path) -> None:
+    """Never focus/start a Clipforge checkout with missing or unapproved local env."""
+    common = command(["git", "-C", str(source_root), "rev-parse", "--path-format=absolute", "--git-common-dir"], timeout=5)
+    clipforge = common.returncode == 0 and Path(common.stdout.strip()).resolve().parent.name == "clipforge"
+    if clipforge and not (root / ".envrc").is_file():
+        raise EditorError(f"{root} lacks .envrc; update this branch before opening its local environment")
+    if not (root / ".envrc").is_file():
+        return
+    keys = ["CLIPFORGE_DEV_PORT", "CLIPFORGE_RENDERER_PORT"] if clipforge else []
+    probe = command(["direnv", "exec", str(root), "python3", "-c",
+                     "import os,sys; sys.exit(any(not os.environ.get(k) for k in sys.argv[1:]))", *keys], timeout=10)
+    if probe.returncode != 0:
+        raise EditorError(f"checkout env unavailable: review {root}/.envrc, run direnv allow {root}, then retry")
+
+
 def resolve_target(root: Path, cwd: Path, raw: str | None) -> tuple[Path | None, int | None]:
     if raw is None:
         return None, None
@@ -284,8 +317,12 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--split", action="store_true", help="reuse a split in the invoking tab")
     mode.add_argument("--tab", action="store_true", help="reuse a dedicated workspace tab (default)")
+    parser.add_argument("--checkout", type=Path, help="listed checkout of the invoking repository")
+    parser.add_argument("--shell", action="store_true", help="open a branch-specific Herdr shell tab instead of Neovim")
     parser.add_argument("location", nargs="?", help="project file, optionally followed by :line")
     args = parser.parse_args(argv)
+    if args.shell and (args.split or args.location):
+        parser.error("--shell cannot be combined with --split or a file location")
 
     if os.environ.get("HERDR_ENV") != "1" and not os.environ.get("HERDR_SOCKET_PATH"):
         raise EditorError("workspace-editor must run inside a Herdr session")
@@ -298,12 +335,23 @@ def main(argv: list[str] | None = None) -> int:
     source = source_pane(workspace_id, process_cwd)
     source_cwd = source.get("foreground_cwd") or source.get("cwd")
     cwd = Path(source_cwd).resolve() if source_cwd else process_cwd
-    root = project_root(cwd)
-    target, line = resolve_target(root, cwd, args.location)
+    source_root = project_root(cwd)
+    if args.checkout:
+        root, branch = checkout_in_repository(source_root, args.checkout)
+        checkout_env_preflight(root, source_root)
+    else:
+        root = source_root
+        branch = ""
+    target, line = resolve_target(root, root if args.checkout else cwd, args.location)
     mode_name = "split" if args.split else "tab"
     root_name = root.name or "project"
     root_id = short_hash(str(root), length=8)
 
+    if args.shell:
+        label = f"Checkout · {branch or root_name} · {root_id}"
+        tab_id, pane_id = find_or_create_tab(workspace_id, root, label)
+        focus_pane(tab_id, pane_id)
+        return 0
     if args.split:
         label = f"Editor · {root_name} · {root_id} · split"
         tab_id, pane_id = find_or_create_split(workspace_id, source, root, label)

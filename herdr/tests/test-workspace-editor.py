@@ -42,6 +42,34 @@ class WorkspaceEditorTests(unittest.TestCase):
             finally:
                 outside.unlink()
 
+    def test_checkout_selection_accepts_only_listed_worktrees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "clipforge"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                            "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+            feature = Path(directory) / "feature"
+            subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "feat/test", str(feature)], check=True)
+            self.assertEqual(workspace_editor.checkout_in_repository(root, feature), (feature.resolve(), "feat/test"))
+            default_branch = subprocess.check_output(["git", "-C", str(root), "branch", "--show-current"], text=True).strip()
+            self.assertEqual(workspace_editor.checkout_in_repository(feature, root), (root.resolve(), default_branch))
+            other = Path(directory) / "unrelated"
+            subprocess.run(["git", "init", "-q", str(other)], check=True)
+            with self.assertRaisesRegex(workspace_editor.EditorError, "not a worktree"):
+                workspace_editor.checkout_in_repository(root, other)
+
+    def test_clipforge_env_preflight_rejects_missing_or_unapproved_envrc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "clipforge"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            with self.assertRaisesRegex(workspace_editor.EditorError, "lacks .envrc"):
+                workspace_editor.checkout_env_preflight(root, root)
+            (root / ".envrc").write_text("export CLIPFORGE_DEV_PORT=12345\n")
+            with self.assertRaisesRegex(workspace_editor.EditorError, "checkout env unavailable"):
+                workspace_editor.checkout_env_preflight(root, root)
+
     def test_identity_is_stable_and_mode_specific(self):
         first = workspace_editor.short_hash("session", "w1", "/project", "tab")
         second = workspace_editor.short_hash("session", "w1", "/project", "tab")
