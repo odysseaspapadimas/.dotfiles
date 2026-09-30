@@ -1,17 +1,12 @@
 # Herdr configuration
 
-## Pi integration patch
+## Pi question status
 
-The tracked Herdr Pi integration adds `rpiv:ask-user:blocked` support so RPIV's
-questionnaire appears as **Needs input** in Herdr. Reapply the patch after
-`herdr integration install pi` or an integration update:
-
-```bash
-herdr-patch-pi-integration
-```
-
-The script is idempotent and refuses to modify an integration whose blocked-event
-layout it does not recognize.
+The tracked Pi extension `pi/.pi/agent/extensions/herdr-rpiv-bridge.ts` translates
+RPIV's `rpiv:ask-user:blocked` event into Herdr's `herdr:blocked` event so the
+questionnaire appears as **Needs input**. It lives separately from Herdr's Pi
+integration and survives `herdr integration install pi` updates. Reload Pi after
+installing or updating the extension.
 
 ## Popup commands
 

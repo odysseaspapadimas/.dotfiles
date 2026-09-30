@@ -92,10 +92,12 @@ for full reads. `read`/`recall` need no Herdr connection unless resolving a pane
   or submitted. Stopped sessions still launch with the CLI starting message.
   Self-send and duplicate-runtime guards remain in place. There is no terminal
   input fallback.
-- `resume`: launches a stopped session. An optional message recovers an
-  incomplete startup or sends a follow-up. Without a message it opens the
-  conversation for inspection, without starting automatic task monitoring.
-- `focus`: only focuses a running session; use `resume` explicitly if stopped.
+- `resume`: launches a stopped session. Omit `message` when merely reopening it:
+  this adds no transcript turn and does not prompt the model. Supplying `message`
+  appends a new user turn and may immediately start model work, so use it only
+  for explicit new/recovery instructions or an incomplete startup.
+- `focus`: only focuses a running session. To simply open a stopped session, call
+  `resume` without `message`, then `focus`.
 - `stop`: preserves history. Whole tabs are closed only for orchestrated
   sessions when every pane belongs to the target; otherwise only target panes
   are closed. Live associations are rechecked immediately before cleanup.

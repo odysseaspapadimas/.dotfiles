@@ -183,6 +183,51 @@ local function open_repository_status(repo)
   })
 end
 
+local function open_repository_commits(repo)
+  local function preview(buf, item)
+    if not item then return end
+    local hash = item:match("^(%S+)")
+    local result = vim.system(
+      { "git", "-C", repo, "--no-pager", "show", "--no-color", "--stat", hash },
+      { text = true }
+    ):wait()
+    vim.bo[buf].filetype = "git"
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(result.stdout or "", "\n"))
+  end
+
+  local function choose(item)
+    local hash = item:match("^(%S+)")
+    -- The picker closes before the new diff tab is opened. Both sides are
+    -- committed versions, so uncommitted work is never part of this view.
+    vim.defer_fn(function()
+      vim.cmd({ cmd = "DiffviewOpen", args = { "-C" .. repo, hash .. "^!" } })
+    end, 10)
+  end
+
+  MiniExtra.pickers.git_commits({ path = repo }, { source = { preview = preview, choose = choose } })
+end
+
+function M.open_commits()
+  local available = repos()
+  if #available == 0 then
+    vim.notify("No Git repositories found at this workspace root", vim.log.levels.WARN)
+  elseif #available == 1 then
+    open_repository_commits(available[1])
+  else
+    MiniPick.start({
+      source = {
+        name = "Git repository for commits",
+        items = vim.tbl_map(function(repo)
+          return { path = repo, text = vim.fs.basename(repo) }
+        end, available),
+        choose = function(item)
+          vim.schedule(function() open_repository_commits(item.path) end)
+        end,
+      },
+    })
+  end
+end
+
 function M.open_status()
   local available = repos()
   if #available == 0 then

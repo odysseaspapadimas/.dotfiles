@@ -173,14 +173,14 @@ test("applies the file-count safety limit across all workspace repositories befo
   const workspace = await temporaryDirectory("pi-ledger-workspace-limit-");
   const cache = join(await temporaryDirectory("pi-ledger-workspace-limit-cache-"), "cache");
   for (const name of ["frontend", "backend"]) await mkdir(join(workspace, name, ".git"), { recursive: true });
-  const paths = Array.from({ length: 2_501 }, (_, index) => `missing-${index}.txt`);
+  const paths = Array.from({ length: 5_001 }, (_, index) => `missing-${index}.txt`);
   const ledger = new ChangedFilesLedger(
     workspaceListingPi(workspace, { frontend: paths, backend: paths }),
     "session-workspace-limit",
     workspace,
     cache,
   );
-  await assert.rejects(ledger.initialize(), /workspace has 5002 candidate files \(limit 5000\)/);
+  await assert.rejects(ledger.initialize(), /workspace has 10002 candidate files \(limit 10000\)/);
   assert.deepEqual(await readdir(ledger.blobDir), []);
 });
 
@@ -327,9 +327,9 @@ test("rejects a tracked path whose parent was replaced by a symlink escape", asy
 test("rejects too many Git candidates before stat or content reads", async () => {
   const root = await temporaryDirectory("pi-ledger-many-");
   const cache = join(await temporaryDirectory("pi-ledger-many-cache-"), "cache");
-  const paths = Array.from({ length: 5_001 }, (_, index) => `missing-${index}.txt`);
+  const paths = Array.from({ length: 10_001 }, (_, index) => `missing-${index}.txt`);
   const ledger = new ChangedFilesLedger(listingPi(root, paths), "session-many", root, cache);
-  await assert.rejects(ledger.initialize(), /5001 candidate files \(limit 5000\)/);
+  await assert.rejects(ledger.initialize(), /10001 candidate files \(limit 10000\)/);
   assert.deepEqual(await readdir(ledger.blobDir), []);
 });
 

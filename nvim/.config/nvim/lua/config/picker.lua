@@ -55,8 +55,20 @@ vim.keymap.set("n", "<leader>fS", function()
   MiniExtra.pickers.lsp({ scope = "workspace_symbol_live" })
 end, { silent = true, desc = "Workspace symbols" })
 vim.keymap.set("n", "<leader>gc", function()
-  MiniExtra.pickers.git_commits({ path = "%" })
-end, { silent = true, desc = "File history" })
+  local path = vim.api.nvim_buf_get_name(0)
+  if path == "" or vim.fn.filereadable(path) == 0 then
+    vim.notify("Open a file to view its Git history", vim.log.levels.WARN)
+    return
+  end
+
+  local result = vim.system({ "git", "-C", vim.fs.dirname(path), "rev-parse", "--show-toplevel" }, { text = true }):wait()
+  if result.code ~= 0 then
+    vim.notify("This file is not in a Git repository", vim.log.levels.WARN)
+    return
+  end
+
+  vim.cmd({ cmd = "DiffviewFileHistory", args = { "-C" .. vim.trim(result.stdout), path } })
+end, { silent = true, desc = "File history (Diffview)" })
 vim.keymap.set("n", "<leader>gh", function()
   local path = vim.api.nvim_buf_get_name(0)
   MiniExtra.pickers.git_hunks({ path = path ~= "" and path or nil })

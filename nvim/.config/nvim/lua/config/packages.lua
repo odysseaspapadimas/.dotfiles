@@ -8,6 +8,7 @@ local specs = {
   { src = "https://github.com/MunifTanjim/nui.nvim" },
   { src = "https://github.com/nvim-neo-tree/neo-tree.nvim", version = "v3.x" },
   { src = "https://github.com/lewis6991/gitsigns.nvim" },
+  { src = "https://github.com/sindrets/diffview.nvim" },
   { src = "https://github.com/lewis6991/satellite.nvim" },
   { src = "https://github.com/nvim-treesitter/nvim-treesitter" },
   { src = "https://github.com/neovim/nvim-lspconfig" },

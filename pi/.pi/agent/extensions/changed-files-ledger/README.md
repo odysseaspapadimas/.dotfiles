@@ -95,7 +95,7 @@ Safety limits are checked across the logical workspace before any content is sto
 - otherwise, only real immediate child directories with their own `.git` marker are considered; discovery never recurses
 - `$HOME` is never accepted as a multi-repository workspace
 - at most 1,000 immediate child entries and 32 repositories
-- at most 5,000 candidate files total across all repositories
+- at most 10,000 candidate files total across all repositories
 - at most 100 MiB candidate/content bytes total across all repositories
 - at most 20 MiB per file
 - 2-second timeout for each bounded Git validation/enumeration command; repository checks run in parallel

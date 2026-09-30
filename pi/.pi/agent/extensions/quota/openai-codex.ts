@@ -12,6 +12,7 @@
  *
  * Commands:
  *   /codex-quota          Show detailed quota and a flexible weekly pacing table
+ *   /codex-quota history  Show daily account quota changes and Pi token counts
  *   /codex-quota refresh  Bypass cache
  *   /codex-quota json     Show normalized JSON
  */
@@ -21,6 +22,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { dailyHistoryText, dailyPiCodexTokens, dailyQuota, loadQuotaSamples, quotaHistoryFile, recordQuotaSample } from "./history.ts";
 
 interface CodexAuthConfig {
 	accessToken: string;
@@ -68,6 +70,7 @@ const TIMEOUT_MS = 10_000;
 
 let lastResult: CodexUsageResponse | null = null;
 let lastFetchAt = 0;
+let historyError: string | null = null;
 
 function readJson(path: string): Record<string, unknown> | null {
 	if (!existsSync(path)) return null;
@@ -192,9 +195,22 @@ async function fetchCodexUsage(force = false, signal?: AbortSignal): Promise<Cod
 			lastFetchAt = Date.now();
 			return lastResult;
 		}
-		lastResult = normalizeUsage(await response.json(), auth);
+		const result = normalizeUsage(await response.json(), auth);
+		lastResult = result;
 		lastFetchAt = Date.now();
-		return lastResult;
+		const weekly = [result.primary, result.secondary].find((w) => w && w.windowSeconds >= 6 * 86400);
+		if (weekly) {
+			try {
+				await recordQuotaSample(quotaHistoryFile(getAgentDir(), auth.accountId, weekly.resetAt), {
+					at: result.fetchedAt, resetAt: weekly.resetAt, usedPercent: weekly.usedPercent,
+				});
+				historyError = null;
+			} catch (error) {
+				// A local storage failure must not hide the live quota result.
+				historyError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		return result;
 	} catch (err) {
 		lastResult = { success: false, error: err instanceof Error ? err.message : String(err) };
 		lastFetchAt = Date.now();
@@ -373,23 +389,26 @@ export default function (pi: ExtensionAPI) {
 		capturedUi.setStatus(STATUS_KEY, text ? capturedUi.theme.fg("dim", text) : undefined);
 	}
 
-	function activate(ui: typeof capturedUi): void {
-		capturedUi = ui;
-		isActive = true;
+	function startSampling(): void {
 		refresh(false).catch(() => {});
 		if (!refreshTimer) refreshTimer = setInterval(() => refresh(false).catch(() => {}), REFRESH_INTERVAL_MS);
 	}
 
+	function activate(ui: typeof capturedUi): void {
+		capturedUi = ui;
+		isActive = true;
+		startSampling();
+	}
+
 	function deactivate(): void {
 		isActive = false;
-		if (refreshTimer) clearInterval(refreshTimer);
-		refreshTimer = null;
 		capturedUi?.setStatus(STATUS_KEY, undefined);
 		capturedUi = null;
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (isOpenAICodexModel(ctx.model)) activate(ctx.ui);
+		else startSampling();
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
@@ -401,10 +420,14 @@ export default function (pi: ExtensionAPI) {
 		if (isActive && isOpenAICodexModel(ctx.model)) setTimeout(() => refresh(true).catch(() => {}), 1500);
 	});
 
-	pi.on("session_shutdown", async () => deactivate());
+	pi.on("session_shutdown", async () => {
+		deactivate();
+		if (refreshTimer) clearInterval(refreshTimer);
+		refreshTimer = null;
+	});
 
 	pi.registerCommand("codex-quota", {
-		description: "Show the current OpenAI Codex quota window",
+		description: "Show Codex quota pacing or daily history (/codex-quota history)",
 		handler: async (args, ctx) => {
 			const mode = args.trim().toLowerCase();
 			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "Codex fetching..."));
@@ -422,7 +445,29 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("OpenAI Codex Quota\n" + detailText(result), "info");
+			if (mode === "history") {
+				const weekly = [result.primary, result.secondary].find((w) => w && w.windowSeconds >= 6 * 86400);
+				if (!weekly) {
+					ctx.ui.notify("No weekly Codex quota window available", "warning");
+					return;
+				}
+				const now = Date.now();
+				const start = weekly.resetAt * 1000 - weekly.windowSeconds * 1000;
+				try {
+					const file = quotaHistoryFile(getAgentDir(), readCodexConfig()?.accountId, weekly.resetAt);
+					const [samples, tokens] = await Promise.all([
+						loadQuotaSamples(file),
+						dailyPiCodexTokens(join(getAgentDir(), "sessions"), start, now),
+					]);
+					const history = dailyHistoryText(start, now, dailyQuota(samples, weekly.resetAt, weekly.windowSeconds, now), tokens);
+					ctx.ui.notify(`OpenAI Codex daily history\n${history}${historyError ? `\n  Quota history could not be saved: ${historyError}` : ""}`, "info");
+				} catch (error) {
+					ctx.ui.notify(`Codex history error: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
+				return;
+			}
+
+			ctx.ui.notify("OpenAI Codex Quota\n" + detailText(result) + "\n  Daily usage: /codex-quota history", "info");
 		},
 	});
 }

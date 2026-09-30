@@ -265,6 +265,13 @@ try {
 
   orchestrator(fakePi);
   assert.equal(registered.name, "pi_sessions");
+  assert.match(registered.description, /omit message to reopen without prompting the model/);
+  assert.match(
+    registered.parameters.properties.message.description,
+    /omit this field when merely reopening the session/,
+  );
+  assert.ok(registered.promptGuidelines.some((guideline: string) =>
+    guideline.includes("call resume without message, then focus")));
   let result = await execute({ action: "list" });
   assert.match(result.content[0].text, /dir_legacy/);
   await assert.rejects(readFile(registryPath), /ENOENT/);
@@ -524,8 +531,15 @@ try {
   result = await execute({ action: "status", id: created.id });
   assert.match(result.content[0].text, /Status: stopped/);
 
+  const userMessagesBeforeResume = SessionManager.open(created.sessionPath).getBranch().filter(
+    (entry: any) => entry.type === "message" && entry.message.role === "user",
+  ).length;
   result = await execute({ action: "resume", id: created.id });
   assert.match(result.content[0].text, /Running/);
+  const userMessagesAfterResume = SessionManager.open(created.sessionPath).getBranch().filter(
+    (entry: any) => entry.type === "message" && entry.message.role === "user",
+  ).length;
+  assert.equal(userMessagesAfterResume, userMessagesBeforeResume, "resume without message must not append a user turn");
 
   // Manual tab closure disappears from the live snapshot without leaving stale state.
   let resumedPane = [...panes.values()].find((pane) => pane.agent_session?.value === created.sessionPath)!;

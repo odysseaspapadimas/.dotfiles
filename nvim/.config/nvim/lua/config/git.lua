@@ -1,3 +1,14 @@
+require("diffview").setup({
+  use_icons = false, -- nvim-web-devicons is not installed
+  enhanced_diff_hl = true,
+  file_panel = { listing_style = "tree" },
+  keymaps = {
+    file_panel = { { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close Git review" } } },
+    file_history_panel = { { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close Git review" } } },
+    view = { { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close Git review" } } },
+  },
+})
+
 require("gitsigns").setup({
   current_line_blame = false,
   signs_staged_enable = true,
