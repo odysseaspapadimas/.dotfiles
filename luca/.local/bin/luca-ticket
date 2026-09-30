@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+exec "$HOME/Luca/.agents/skills/luca-ticket/scripts/luca-ticket" "$@"

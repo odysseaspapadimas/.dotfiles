@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Local, per-ticket Luca development environments. No production services or credentials."""
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(os.environ.get("LUCA_ROOT", Path.home() / "Luca")).expanduser().resolve()
+TICKETS = ROOT / ".ticket-worktrees"
+CONFIG = Path(os.environ.get("LUCA_LOCAL_ENV", Path.home() / ".config/luca/local.env")).expanduser()
+MARKER = "# Managed by luca-ticket; changes may be overwritten.\n"
+REPOS = {"backend": "luca-backend", "ims": "luca-ims"}
+
+
+def fail(message):
+    raise ValueError(message)
+
+
+def ticket_dir(ticket):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", ticket):
+        fail("ticket must be a short alphanumeric ID (hyphens/underscores allowed)")
+    return TICKETS / ticket
+
+
+def names(ticket):
+    suffix = re.sub(r"[^a-z0-9]", "_", ticket.lower())
+    digest = hashlib.sha256(ticket.encode()).hexdigest()[:6]
+    return f"luca_dev_{suffix}_{digest}", f"luca_test_{suffix}_{digest}"
+
+
+def manifest_path(ticket):
+    return ticket_dir(ticket) / ".luca-env.json"
+
+
+def manifest(ticket):
+    path = manifest_path(ticket)
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def config():
+    if not CONFIG.is_file():
+        fail(f"backend setup needs machine-local {CONFIG} (see skill references/local.env.example)")
+    values = {}
+    for line in CONFIG.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            fail(f"invalid KEY=VALUE line in {CONFIG}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in ("MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_PORT"):
+            fail(f"unsupported key in {CONFIG}: {key}")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    if not values.get("MYSQL_USER") or "MYSQL_PASSWORD" not in values:
+        fail(f"set MYSQL_USER and MYSQL_PASSWORD in {CONFIG}")
+    port = values.get("MYSQL_PORT", "3306")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        fail("MYSQL_PORT must be a valid port")
+    values["MYSQL_PORT"] = port
+    return values
+
+
+def available(port, ticket, key):
+    for path in TICKETS.glob("*/.luca-env.json"):
+        if path.parent.name == ticket:
+            continue
+        try:
+            if json.loads(path.read_text()).get(key) == port:
+                return False
+        except (ValueError, OSError):
+            continue
+    with socket.socket() as sock:
+        return sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+def port_for(ticket, key, start):
+    offset = int(hashlib.sha256((ticket + key).encode()).hexdigest()[:8], 16) % 800
+    for i in range(800):
+        port = start + (offset + i) % 800
+        if available(port, ticket, key):
+            return port
+    fail(f"no free {key} port")
+
+
+def atomic_write(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".luca-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def dotenv(value):
+    if "\n" in value or "\r" in value:
+        fail("multiline values are not supported in local.env")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def managed_write(path, content):
+    if path.exists() and not path.read_text().startswith(MARKER):
+        fail(f"{path} already exists and is not managed by luca-ticket; left untouched")
+    atomic_write(path, MARKER + content)
+
+
+def make_databases(cfg, databases):
+    # mysql's defaults-extra-file avoids passwords in command arguments or output.
+    fd, path = tempfile.mkstemp(prefix="luca-mysql-")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write("[client]\n" + "host=127.0.0.1\n" + "port=" + cfg["MYSQL_PORT"] + "\n")
+            stream.write("user=" + cfg["MYSQL_USER"] + "\npassword=" + cfg["MYSQL_PASSWORD"] + "\n")
+        os.chmod(path, 0o600)
+        for name in databases:
+            # Names are derived from a validated ticket ID, not SQL input.
+            subprocess.run([os.environ.get("LUCA_MYSQL_BIN", "mysql"),
+                            "--defaults-extra-file=" + path, "-e",
+                            f"CREATE DATABASE IF NOT EXISTS `{name}` CHARACTER SET utf8mb4"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as error:
+        fail("local MySQL could not create the ticket databases; check credentials and CREATE privilege")
+    finally:
+        os.unlink(path)
+
+
+def checkout(ticket, repo):
+    path = ticket_dir(ticket) / REPOS[repo]
+    if not path.is_dir() or not (path / ".git").exists():
+        fail(f"create the {repo} Git worktree first: {path}")
+    return path
+
+
+def setup(args):
+    repos = [r.strip() for r in args.repos.split(",")]
+    if not repos or any(r not in REPOS for r in repos) or len(set(repos)) != len(repos):
+        fail("--repos accepts backend,ims (or one of them)")
+    paths = {repo: checkout(args.ticket, repo) for repo in repos}
+    for repo, filename in (("backend", ".env"), ("ims", ".env.local")):
+        if repo in paths:
+            target = paths[repo] / filename
+            if target.exists() and not target.read_text().startswith(MARKER):
+                fail(f"{target} already exists and is not managed by luca-ticket; left untouched")
+    state = manifest(args.ticket)
+    if state and state.get("ticket") != args.ticket:
+        fail("ticket manifest does not match its directory")
+    dev_db, test_db = names(args.ticket)
+    state = state or {"ticket": args.ticket, "backend_port": port_for(args.ticket, "backend_port", 8000),
+                      "ims_port": port_for(args.ticket, "ims_port", 5100), "dev_db": dev_db, "test_db": test_db}
+    if state.get("dev_db") != dev_db or state.get("test_db") != test_db:
+        fail("existing ticket manifest has unexpected database names")
+    cfg = config() if "backend" in repos else None
+    if cfg:
+        make_databases(cfg, (dev_db, test_db))
+        env_file = paths["backend"] / ".env"
+        previous = env_file.read_text() if env_file.is_file() else ""
+        key_match = re.search(r"^APP_KEY=(.+)$", previous, re.M) if previous.startswith(MARKER) else None
+        app_key = key_match.group(1).strip('"') if key_match else "base64:" + base64.b64encode(secrets.token_bytes(32)).decode()
+        pairs = {"APP_NAME": "Luca", "APP_ENV": "local", "APP_DEBUG": "true", "APP_KEY": app_key,
+                 "APP_URL": f"http://127.0.0.1:{state['backend_port']}", "DB_CONNECTION": "mysql",
+                 "DB_HOST": "127.0.0.1", "DB_PORT": cfg["MYSQL_PORT"], "DB_URL": "",
+                 "DB_DATABASE": dev_db, "DB_USERNAME": cfg["MYSQL_USER"], "DB_PASSWORD": cfg["MYSQL_PASSWORD"],
+                 "MAIL_MAILER": "log", "QUEUE_CONNECTION": "sync", "CACHE_STORE": "file", "SESSION_DRIVER": "file"}
+        managed_write(env_file, "".join(f"{k}={dotenv(v)}\n" for k, v in pairs.items()))
+    if "ims" in repos:
+        managed_write(paths["ims"] / ".env.local",
+                      f"VITE_API_URL=http://127.0.0.1:{state['backend_port']}\n")
+    state["repos"] = sorted(set(state.get("repos", [])) | set(repos))
+    atomic_write(manifest_path(args.ticket), json.dumps(state, indent=2) + "\n")
+    show(args.ticket)
+
+
+def show(ticket):
+    state = manifest(ticket)
+    if not state:
+        fail(f"no environment for {ticket}; run setup after creating its worktrees")
+    print(f"{ticket}: repos={','.join(state['repos'])} backend=127.0.0.1:{state['backend_port']} "
+          f"ims=127.0.0.1:{state['ims_port']}")
+    if "backend" in state["repos"]:
+        print(f"  local DB: {state['dev_db']} | test DB: {state['test_db']}")
+
+
+def test_backend(args):
+    state = manifest(args.ticket)
+    if not state or "backend" not in state.get("repos", []):
+        fail("set up this ticket's backend before running its tests")
+    backend = checkout(args.ticket, "backend")
+    cfg = config()
+    if (backend / "bootstrap/cache/config.php").exists():
+        fail("cached Laravel config exists in this worktree; clear it before testing")
+    env = os.environ.copy()
+    env.update({"APP_ENV": "testing", "DB_CONNECTION": "mysql", "DB_URL": "",
+                "DB_HOST": "127.0.0.1", "DB_PORT": cfg["MYSQL_PORT"], "DB_DATABASE": state["test_db"],
+                "DB_USERNAME": cfg["MYSQL_USER"], "DB_PASSWORD": cfg["MYSQL_PASSWORD"]})
+    # Boot Laravel with the test environment, inspecting only non-secret targets.
+    probe = ("require 'vendor/autoload.php'; $app=require 'bootstrap/app.php'; "
+             "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap(); "
+             "$c=config('database.connections.mysql'); "
+             "if(config('database.default')!=='mysql' || $c['host']!=='127.0.0.1' "
+             "|| (string)$c['port']!==getenv('DB_PORT') || $c['database']!==getenv('DB_DATABASE') "
+             "|| !empty($c['url'])) {fwrite(STDERR,'Unexpected database target\\n'); exit(1);}")
+    subprocess.run([os.environ.get("LUCA_PHP_BIN", "php"), "-r", probe], cwd=backend, env=env, check=True)
+    flags = args.flags[1:] if args.flags[:1] == ["--"] else args.flags
+    subprocess.run([os.environ.get("LUCA_PHP_BIN", "php"), "artisan", "test", *flags], cwd=backend, env=env, check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    setup_parser = sub.add_parser("setup", help="provision local databases and ignored checkout env files")
+    setup_parser.add_argument("ticket")
+    setup_parser.add_argument("--repos", required=True, help="backend,ims or a single repo")
+    status_parser = sub.add_parser("status", help="show non-secret ticket environment")
+    status_parser.add_argument("ticket")
+    test_parser = sub.add_parser("test", help="run isolated backend tests; pass extra artisan flags after --")
+    test_parser.add_argument("ticket")
+    test_parser.add_argument("repo", choices=["backend"])
+    test_parser.add_argument("flags", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    try:
+        ticket_dir(args.ticket)
+        if args.command == "setup":
+            setup(args)
+        elif args.command == "status":
+            show(args.ticket)
+        else:
+            test_backend(args)
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f"luca-ticket: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

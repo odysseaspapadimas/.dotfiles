@@ -36,6 +36,7 @@ herdr-w             # Attach to the remote Ubuntu work session
 - `hunk` — Hunk Catppuccin Mocha review theme.
 - `portd` — SSH development-port forwarding, Linux user service, and Herdr plugin.
 - `macos` — Mac launch agents and wrappers; stow only on macOS.
+- `luca` — Luca ticket orchestration skill, local environment helper, and `~/Luca/AGENTS.md`. MySQL credentials remain machine-local in `~/.config/luca/local.env`.
 
 Embedded Rust source and tests are excluded from Stow, so they no longer create `~/portd`, `~/project-scratch`, `~/project-scripts`, or `~/tests` links.
 
