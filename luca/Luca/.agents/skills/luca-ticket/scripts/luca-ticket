@@ -195,19 +195,19 @@ def show(ticket):
         print(f"  local DB: {state['dev_db']} | test DB: {state['test_db']}")
 
 
-def test_backend(args):
-    state = manifest(args.ticket)
+def backend_context(ticket, database, environment):
+    state = manifest(ticket)
     if not state or "backend" not in state.get("repos", []):
-        fail("set up this ticket's backend before running its tests")
-    backend = checkout(args.ticket, "backend")
-    cfg = config()
+        fail("set up this ticket's backend first")
+    backend = checkout(ticket, "backend")
     if (backend / "bootstrap/cache/config.php").exists():
-        fail("cached Laravel config exists in this worktree; clear it before testing")
+        fail("cached Laravel config exists in this worktree; clear it before running commands")
+    cfg = config()
     env = os.environ.copy()
-    env.update({"APP_ENV": "testing", "DB_CONNECTION": "mysql", "DB_URL": "",
-                "DB_HOST": "127.0.0.1", "DB_PORT": cfg["MYSQL_PORT"], "DB_DATABASE": state["test_db"],
+    env.update({"APP_ENV": environment, "DB_CONNECTION": "mysql", "DB_URL": "",
+                "DB_HOST": "127.0.0.1", "DB_PORT": cfg["MYSQL_PORT"], "DB_DATABASE": state[database],
                 "DB_USERNAME": cfg["MYSQL_USER"], "DB_PASSWORD": cfg["MYSQL_PASSWORD"]})
-    # Boot Laravel with the test environment, inspecting only non-secret targets.
+    # Boot Laravel first, inspecting only its effective, non-secret connection target.
     probe = ("require 'vendor/autoload.php'; $app=require 'bootstrap/app.php'; "
              "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap(); "
              "$c=config('database.connections.mysql'); "
@@ -215,8 +215,24 @@ def test_backend(args):
              "|| (string)$c['port']!==getenv('DB_PORT') || $c['database']!==getenv('DB_DATABASE') "
              "|| !empty($c['url'])) {fwrite(STDERR,'Unexpected database target\\n'); exit(1);}")
     subprocess.run([os.environ.get("LUCA_PHP_BIN", "php"), "-r", probe], cwd=backend, env=env, check=True)
+    return backend, env
+
+
+def test_backend(args):
+    backend, env = backend_context(args.ticket, "test_db", "testing")
     flags = args.flags[1:] if args.flags[:1] == ["--"] else args.flags
     subprocess.run([os.environ.get("LUCA_PHP_BIN", "php"), "artisan", "test", *flags], cwd=backend, env=env, check=True)
+
+
+def init_backend(args):
+    backend = checkout(args.ticket, "backend")
+    if not (backend / "database/seeders/TicketDemoSeeder.php").is_file():
+        fail("this backend checkout lacks TicketDemoSeeder; update it before initializing")
+    backend, env = backend_context(args.ticket, "dev_db", "local")
+    php = os.environ.get("LUCA_PHP_BIN", "php")
+    subprocess.run([php, "artisan", "migrate", "--no-interaction"], cwd=backend, env=env, check=True)
+    subprocess.run([php, "artisan", "db:seed", "--class=TicketDemoSeeder", "--no-interaction"],
+                   cwd=backend, env=env, check=True)
 
 
 def main():
@@ -225,6 +241,9 @@ def main():
     setup_parser = sub.add_parser("setup", help="provision local databases and ignored checkout env files")
     setup_parser.add_argument("ticket")
     setup_parser.add_argument("--repos", required=True, help="backend,ims or a single repo")
+    init_parser = sub.add_parser("init", help="migrate and seed a ticket's local backend database")
+    init_parser.add_argument("ticket")
+    init_parser.add_argument("repo", choices=["backend"])
     status_parser = sub.add_parser("status", help="show non-secret ticket environment")
     status_parser.add_argument("ticket")
     test_parser = sub.add_parser("test", help="run isolated backend tests; pass extra artisan flags after --")
@@ -238,6 +257,8 @@ def main():
             setup(args)
         elif args.command == "status":
             show(args.ticket)
+        elif args.command == "init":
+            init_backend(args)
         else:
             test_backend(args)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:

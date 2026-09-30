@@ -82,6 +82,19 @@ with open(os.environ['FAKE_LOG'], 'a') as f:
         (cache / "config.php").write_text("cached")
         self.assertIn("cached Laravel config", self.run_cli("test", "LHD-123", "backend", ok=False).stderr)
 
+    def test_init_requires_synthetic_seeder_and_targets_dev_db(self):
+        self.run_cli("setup", "LHD-123", "--repos", "backend")
+        self.assertIn("lacks TicketDemoSeeder", self.run_cli("init", "LHD-123", "backend", ok=False).stderr)
+        seeder = self.ticket / "luca-backend/database/seeders/TicketDemoSeeder.php"
+        seeder.parent.mkdir(parents=True)
+        seeder.write_text("<?php // fixture\n")
+        self.run_cli("init", "LHD-123", "backend")
+        state = json.loads((self.ticket / ".luca-env.json").read_text())
+        records = [json.loads(line) for line in self.log.read_text().splitlines()][-3:]
+        self.assertEqual([row["db"] for row in records], [state["dev_db"]] * 3)
+        self.assertEqual(records[1]["argv"], ["artisan", "migrate", "--no-interaction"])
+        self.assertEqual(records[2]["argv"], ["artisan", "db:seed", "--class=TicketDemoSeeder", "--no-interaction"])
+
     def test_ims_setup_does_not_need_mysql_credentials(self):
         self.config.unlink()
         self.run_cli("setup", "LHD-123", "--repos", "ims")
