@@ -22,9 +22,8 @@ apply_correct_profile() {
   [[ -n "$monitor" ]] || return 1
 
   if jq -e '.availableModes | any(startswith("3440x1440@144"))' <<<"$monitor" >/dev/null; then
-    # This DisplayPort link is unstable above 60 Hz, especially after AC
-    # power changes, so use the reliable full-resolution mode.
-    mode="3440x1440@60"
+    # Use the Xiaomi's full-resolution 144 Hz mode after each hot-plug.
+    mode="3440x1440@144"
     position="1600x-300"
     label="Xiaomi"
   else
