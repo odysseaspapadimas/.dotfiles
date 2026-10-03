@@ -22,6 +22,8 @@ dot --stow-only    # Restow without pulling or building
 herdr-w             # Attach to the remote Ubuntu work session
 ```
 
+Fish’s `~/.config/fish/fish_variables` is machine-local runtime state, not shared configuration. `dot` preserves existing values when converting old Stow symlinks to a real local file; Git and `dot`’s Stow invocation exclude that file. Shared path settings use session-global variables in `config.fish`, so starting or upgrading Fish does not dirty the repository. Other configuration changes still trigger `dot`’s normal commit-or-stash safeguard.
+
 `herdr-w` expects an SSH host named `ubuntu`. SSH keys and `~/.ssh/config` remain machine-local and are intentionally not tracked. The current setup uses Ubuntu's Tailscale address.
 
 ## Packages

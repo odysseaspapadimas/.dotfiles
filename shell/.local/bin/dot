@@ -15,6 +15,40 @@ if (($#)); then
   exit 2
 fi
 
+localize_fish_state() {
+  local config_dir="$HOME/.config/fish"
+  local managed_dir="$repo/shell/.config/fish"
+  local state="$config_dir/fish_variables"
+  local temporary migrated=false
+
+  # Stow may have folded the whole directory, or linked just the state file.
+  # Preserve the live tree before replacing either managed symlink.
+  if [[ -L $config_dir && $(readlink -f "$config_dir") == "$managed_dir" ]]; then
+    temporary="$(mktemp -d "$HOME/.config/.fish-local.XXXXXX")"
+    cp -a "$config_dir/." "$temporary/"
+    rm -- "$config_dir"
+    mv -- "$temporary" "$config_dir"
+    migrated=true
+  fi
+  if [[ -L $state && $(readlink -f "$state") == "$managed_dir/fish_variables" ]]; then
+    temporary="$(mktemp "$config_dir/.fish-variables.XXXXXX")"
+    cp -pL "$state" "$temporary"
+    mv -f -- "$temporary" "$state"
+    migrated=true
+  fi
+
+  mkdir -p "$config_dir"
+  # A local file also prevents Stow folding this directory back into the repo.
+  [[ -e $state || -L $state ]] || touch "$state"
+  if [[ $migrated == true ]]; then
+    # The values are now preserved locally; discard only the old tracked copy.
+    if git -C "$repo" ls-files --error-unmatch shell/.config/fish/fish_variables >/dev/null 2>&1; then
+      git -C "$repo" restore --worktree -- shell/.config/fish/fish_variables
+    fi
+    echo "dot: preserved Fish universal variables as machine-local state"
+  fi
+}
+
 install_cli_dependencies() {
   local missing=()
   local command package
@@ -181,6 +215,8 @@ ensure_fish_login_shell() {
   fi
 }
 
+localize_fish_state
+
 if [[ $stow_only == false ]]; then
   if [[ -n $(git -C "$repo" status --porcelain) ]]; then
     echo "dot: $repo has uncommitted changes; commit or stash them first" >&2
@@ -204,7 +240,7 @@ echo "dot: restowing ${available[*]}"
 # Quattro ships its own defaults at many of these paths. Adopt only the files
 # represented by our Stow packages, then restore our committed versions through
 # the resulting links. Unrelated Quattro configuration remains untouched.
-stow --adopt -R -d "$repo" -t "$HOME" "${available[@]}"
+stow --ignore='(^|/)fish_variables$' --adopt -R -d "$repo" -t "$HOME" "${available[@]}"
 git -C "$repo" restore --worktree -- "${available[@]}"
 [[ $stow_only == true ]] || enable_services
 echo "dot: synchronized"

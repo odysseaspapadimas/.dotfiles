@@ -4,6 +4,9 @@
 __pycache__/
 *.pyc
 
+# Fish universal variables are generated, machine-local state
+**/fish_variables
+
 # Never track dependency installs or generated package trees
 **/node_modules/
 
