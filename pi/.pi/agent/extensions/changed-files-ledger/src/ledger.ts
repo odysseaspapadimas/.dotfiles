@@ -312,7 +312,7 @@ export class ChangedFilesLedger {
 
   async initialize(): Promise<void> {
     const requestedRoot = this.root;
-    const workspace = await this.discoverWorkspace(requestedRoot);
+    const workspace = await this.discoverWorkspace(requestedRoot, await this.storedWorkspaceRepositories(requestedRoot));
     this.root = workspace.root;
     this.workspaceKind = workspace.kind;
     this.repositories = workspace.repositories;
@@ -325,7 +325,7 @@ export class ChangedFilesLedger {
         throw new Error("Changed-files ledger cache does not match the current session workspace");
       }
       if (!sameRepositories(restored.repositories, this.repositories) || restored.workspaceKind !== this.workspaceKind) {
-        throw new Error("Changed-files ledger disabled: workspace repository membership changed; restore the original immediate-child repositories or start a new Pi session.");
+        throw new Error("Changed-files ledger disabled: a selected workspace repository changed; restore it or start a new Pi session.");
       }
       this.index = restored;
       this.index.latest = await this.captureSnapshot();
@@ -354,7 +354,18 @@ export class ChangedFilesLedger {
     await this.pruneGlobalCache();
   }
 
-  private async discoverWorkspace(requestedRoot: string): Promise<{ root: string; kind: "single" | "multi"; repositories: RepositoryDescriptor[] }> {
+  /** Use a saved multi-repo selection before discovery so unrelated new siblings stay out of the session. */
+  private async storedWorkspaceRepositories(root: string): Promise<RepositoryDescriptor[] | undefined> {
+    try {
+      const stored = JSON.parse(await readFile(this.indexPath, "utf8")) as Partial<LedgerIndex>;
+      if (stored.version === INDEX_VERSION && stored.root === root && stored.workspaceKind === "multi" && Array.isArray(stored.repositories)) {
+        return stored.repositories;
+      }
+    } catch { /* A new session (or unreadable cache) uses normal discovery. */ }
+    return undefined;
+  }
+
+  private async discoverWorkspace(requestedRoot: string, selected?: readonly RepositoryDescriptor[]): Promise<{ root: string; kind: "single" | "multi"; repositories: RepositoryDescriptor[] }> {
     const root = resolve(requestedRoot);
     const direct = await this.pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: root, timeout: GIT_TIMEOUT_MS });
     if (direct.killed) throw new Error(`Changed-files ledger disabled: Git validation timed out for ${root}.`);
@@ -376,29 +387,51 @@ export class ChangedFilesLedger {
     }
 
     const candidates: Array<{ name: string; root: string }> = [];
-    let children = 0;
-    const directory = await opendir(root);
-    for await (const entry of directory) {
-      children += 1;
-      if (children > MAX_WORKSPACE_CHILDREN) {
-        throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_WORKSPACE_CHILDREN} immediate children.`);
-      }
-      const childRoot = join(root, entry.name);
-      if (entry.isSymbolicLink()) {
-        if (await lstatOptional(join(childRoot, ".git"))) {
-          throw new Error(`Changed-files ledger disabled: symlinked repository candidate is not allowed: ${entry.name}`);
+    if (selected) {
+      if (selected.length > MAX_REPOSITORIES) throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_REPOSITORIES} selected repositories.`);
+      const names = new Set<string>();
+      for (const repository of selected) {
+        const name = validateRepositoryName(repository.name);
+        const childRoot = join(root, name);
+        if (names.has(name) || repository.prefix !== name || repository.root !== childRoot) {
+          throw new Error("Changed-files ledger disabled: saved workspace repository selection is invalid.");
         }
-        continue;
+        names.add(name);
+        const child = await lstatOptional(childRoot);
+        const marker = await lstatOptional(join(childRoot, ".git"));
+        if (!child?.isDirectory() || !marker) {
+          throw new Error(`Changed-files ledger disabled: selected workspace repository ${name} is missing or no longer a Git worktree.`);
+        }
+        if (marker.isSymbolicLink() || (!marker.isDirectory() && !marker.isFile())) {
+          throw new Error(`Changed-files ledger disabled: unsafe .git marker in selected repository ${name}.`);
+        }
+        candidates.push({ name, root: childRoot });
       }
-      if (!entry.isDirectory()) continue;
-      const marker = await lstatOptional(join(childRoot, ".git"));
-      if (!marker) continue;
-      if (marker.isSymbolicLink() || (!marker.isDirectory() && !marker.isFile())) {
-        throw new Error(`Changed-files ledger disabled: unsafe .git marker in immediate child ${entry.name}.`);
-      }
-      candidates.push({ name: validateRepositoryName(entry.name), root: childRoot });
-      if (candidates.length > MAX_REPOSITORIES) {
-        throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_REPOSITORIES} immediate-child repositories.`);
+    } else {
+      let children = 0;
+      const directory = await opendir(root);
+      for await (const entry of directory) {
+        children += 1;
+        if (children > MAX_WORKSPACE_CHILDREN) {
+          throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_WORKSPACE_CHILDREN} immediate children.`);
+        }
+        const childRoot = join(root, entry.name);
+        if (entry.isSymbolicLink()) {
+          if (await lstatOptional(join(childRoot, ".git"))) {
+            throw new Error(`Changed-files ledger disabled: symlinked repository candidate is not allowed: ${entry.name}`);
+          }
+          continue;
+        }
+        if (!entry.isDirectory()) continue;
+        const marker = await lstatOptional(join(childRoot, ".git"));
+        if (!marker) continue;
+        if (marker.isSymbolicLink() || (!marker.isDirectory() && !marker.isFile())) {
+          throw new Error(`Changed-files ledger disabled: unsafe .git marker in immediate child ${entry.name}.`);
+        }
+        candidates.push({ name: validateRepositoryName(entry.name), root: childRoot });
+        if (candidates.length > MAX_REPOSITORIES) {
+          throw new Error(`Changed-files ledger disabled: workspace has more than ${MAX_REPOSITORIES} immediate-child repositories.`);
+        }
       }
     }
 
@@ -430,9 +463,9 @@ export class ChangedFilesLedger {
   }
 
   private async validateWorkspaceMembership(): Promise<void> {
-    const current = await this.discoverWorkspace(this.root);
+    const current = await this.discoverWorkspace(this.root, this.workspaceKind === "multi" ? this.repositories : undefined);
     if (current.root !== this.root || current.kind !== this.workspaceKind || !sameRepositories(current.repositories, this.repositories)) {
-      throw new Error("Changed-files ledger disabled: workspace repository membership changed; no repository was skipped.");
+      throw new Error("Changed-files ledger disabled: a selected workspace repository changed; no selected repository was skipped.");
     }
   }
 

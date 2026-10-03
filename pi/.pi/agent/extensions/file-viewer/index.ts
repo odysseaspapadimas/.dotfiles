@@ -38,7 +38,8 @@ async function resolveLocation(root: string, location: Location): Promise<Locati
 }
 
 function frame(theme: Theme, title: string, body: string[], footer: string, width: number): string[] {
-  const inner = Math.max(20, width - 2);
+  if (width < 4) return [truncateToWidth(title, Math.max(0, width), "")];
+  const inner = width - 2;
   const border = (value: string) => theme.fg("border", value);
   const heading = theme.fg("accent", theme.bold(` ${title} `));
   const row = (value: string) => {
@@ -46,7 +47,7 @@ function frame(theme: Theme, title: string, body: string[], footer: string, widt
     return border("│") + clipped + " ".repeat(Math.max(0, inner - visibleWidth(clipped))) + border("│");
   };
   return [
-    border("╭─") + heading + border("─".repeat(Math.max(0, inner - visibleWidth(heading) - 1)) + "╮"),
+    border("╭─") + truncateToWidth(heading, inner - 1, "") + border("─".repeat(Math.max(0, inner - visibleWidth(heading) - 1)) + "╮"),
     ...body.map(row),
     border("├" + "─".repeat(inner) + "┤"),
     row(footer),

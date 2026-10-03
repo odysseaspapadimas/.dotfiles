@@ -1,14 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-	clampThinkingLevel,
-	streamOpenAICodexResponses,
-	streamSimpleOpenAICodexResponses,
-	type AssistantMessageEventStream,
-	type Context,
-	type Model,
-	type OpenAICodexResponsesOptions,
-	type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 
 const STATE_ENTRY_TYPE = "codex-fast-mode-state-v1";
 const CODEX_ORIGINATOR = "codex_cli_rs";
@@ -24,7 +15,9 @@ function installWebSocketOriginatorPatch(): WebSocketPatchState {
 	globalThis.WebSocket = new Proxy(NativeWebSocket, {
 		construct(target, args, newTarget) {
 			const [url, options, ...rest] = args;
-			if (state.enabled && options && typeof options === "object" && !Array.isArray(options)) {
+			const endpoint = new URL(String(url));
+			if (state.enabled && endpoint.hostname === "chatgpt.com" && endpoint.pathname.startsWith("/backend-api/codex/") &&
+				options && typeof options === "object" && !Array.isArray(options)) {
 				const candidate = options as { headers?: HeadersInit };
 				const headers = new Headers(candidate.headers);
 				headers.set("originator", CODEX_ORIGINATOR);
@@ -46,6 +39,10 @@ export const FAST_MODE_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
+	"gpt-6-astra",
+	"gpt-6-luna",
+	"gpt-6-sol",
+	"gpt-6.1-sol",
 ]);
 
 export type FastModeModel = Pick<Model<any>, "provider" | "api" | "id">;
@@ -74,54 +71,24 @@ export function restoreFastMode(entries: readonly unknown[]): boolean {
 	return enabled;
 }
 
-function nativeFastOptions(
-	model: Model<"openai-codex-responses">,
-	options: SimpleStreamOptions | undefined,
-): OpenAICodexResponsesOptions {
-	const clamped = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	return {
-		temperature: options?.temperature,
-		maxTokens: options?.maxTokens ?? (model.maxTokens > 0 ? Math.min(model.maxTokens, 32_000) : undefined),
-		signal: options?.signal,
-		apiKey: options?.apiKey,
-		transport: options?.transport,
-		cacheRetention: options?.cacheRetention,
-		sessionId: options?.sessionId,
-		onPayload: options?.onPayload,
-		onResponse: options?.onResponse,
-		headers: options?.headers,
-		timeoutMs: options?.timeoutMs,
-		maxRetries: options?.maxRetries,
-		maxRetryDelayMs: options?.maxRetryDelayMs,
-		metadata: options?.metadata,
-		reasoningEffort: clamped === "off" ? undefined : clamped,
-		serviceTier: "priority",
-	};
-}
-
 export default function codexFastMode(pi: ExtensionAPI) {
 	let enabled = false;
 	const websocketPatch = installWebSocketOriginatorPatch();
 
 	const updateStatus = (ctx: Pick<ExtensionContext, "model" | "ui">) => {
+		websocketPatch.enabled = enabled && supportsFastMode(ctx.model);
 		const text = enabled && supportsFastMode(ctx.model)
 			? ctx.ui.theme.fg("accent", "fast")
 			: undefined;
 		ctx.ui.setStatus(STATUS_KEY, text);
 	};
 
-	pi.registerProvider("openai-codex", {
-		api: "openai-codex-responses",
-		streamSimple: (
-			model: Model<"openai-codex-responses">,
-			context: Context,
-			options?: SimpleStreamOptions,
-		): AssistantMessageEventStream => {
-			if (!enabled || !supportsFastMode(model)) {
-				return streamSimpleOpenAICodexResponses(model, context, options);
-			}
-			return streamOpenAICodexResponses(model, context, nativeFastOptions(model, options));
-		},
+	// Leave Pi's native provider, auth, thinking mapping, and stream hooks intact.
+	// Only change the wire payload instead of rebuilding SimpleStreamOptions.
+	pi.on("before_provider_request", (event, ctx) => {
+		if (!enabled || !supportsFastMode(ctx.model) || !event.payload ||
+			typeof event.payload !== "object" || Array.isArray(event.payload)) return;
+		return { ...event.payload, service_tier: "priority" };
 	});
 
 	const restoreState = (ctx: ExtensionContext) => {
@@ -133,7 +100,10 @@ export default function codexFastMode(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => restoreState(ctx));
 	pi.on("session_tree", (_event, ctx) => restoreState(ctx));
 	pi.on("model_select", (_event, ctx) => updateStatus(ctx));
-	pi.on("session_shutdown", (_event, ctx) => ctx.ui.setStatus(STATUS_KEY, undefined));
+	pi.on("session_shutdown", (_event, ctx) => {
+		websocketPatch.enabled = false;
+		ctx.ui.setStatus(STATUS_KEY, undefined);
+	});
 
 	pi.registerCommand("fast", {
 		description: "Toggle Codex Fast Mode: /fast [on|off|status]",
@@ -143,7 +113,7 @@ export default function codexFastMode(pi: ExtensionAPI) {
 				.map((value) => ({ value, label: value }));
 			return options.length > 0 ? options : null;
 		},
-		handler: (args, ctx) => {
+		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
 			if (action === "status") {
 				const applicability = supportsFastMode(ctx.model) ? "supported model" : "unsupported model";

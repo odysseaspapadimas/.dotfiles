@@ -97,6 +97,7 @@ export function conversationPage(snapshot: SessionSnapshot, limit: number, curso
     }
   }
   const lines: string[] = [];
+  const messages: Array<TranscriptEntry & { offset: number }> = [];
   let remaining = 7000; // <= 28KB UTF-8, including headers; independent of message count.
   let remainingLines = 800;
   let nextCursor: string | undefined;
@@ -113,13 +114,15 @@ export function conversationPage(snapshot: SessionSnapshot, limit: number, curso
       if (count === remainingLines - 4) end = newline + 1;
     }
     if (end < entry.text.length && /[\uD800-\uDBFF]/u.test(entry.text[end - 1])) end--;
-    const line = heading + entry.text.slice(offset, end);
+    const text = entry.text.slice(offset, end);
+    const line = heading + text;
     lines.push(line);
+    messages.push({ ...entry, text, offset });
     remaining -= line.length + 2;
     remainingLines -= line.split("\n").length + 2;
     if (end < entry.text.length) { nextCursor = `${entry.id}:${end}`; break; }
     offset = 0;
   }
   if (!nextCursor && index < entries.length) nextCursor = `${entries[index].id}:0`;
-  return { text: lines.join("\n\n") || "(No user/assistant messages yet.)", nextCursor, total: entries.length };
+  return { text: lines.join("\n\n") || "(No user/assistant messages yet.)", messages, nextCursor, total: entries.length };
 }

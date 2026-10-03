@@ -234,7 +234,7 @@ test("rejects symlinked and submodule immediate-child repository candidates", as
   await assert.rejects(access(cache), /ENOENT/);
 });
 
-test("rejects workspace membership changes rather than silently skipping a repository", async () => {
+test("pins the original repositories when unrelated worktrees appear, including after reopening", async () => {
   const workspace = await temporaryDirectory("pi-ledger-workspace-membership-");
   const cache = await temporaryDirectory("pi-ledger-cache-");
   const frontend = join(workspace, "frontend");
@@ -242,11 +242,46 @@ test("rejects workspace membership changes rather than silently skipping a repos
   await initRepo(frontend);
   const ledger = new ChangedFilesLedger(fakePi(), "session-membership", workspace, cache);
   await ledger.initialize();
+  const checkpoint = await ledger.createCheckpoint("named", "original");
 
   const backend = join(workspace, "backend");
-  await mkdir(backend);
-  await initRepo(backend);
-  await assert.rejects(ledger.captureSnapshot(), /workspace repository membership changed; no repository was skipped/);
+  await execFileAsync("git", ["worktree", "add", "-qb", "unrelated-worktree", backend], { cwd: frontend });
+  await writeFile(join(backend, "tracked.txt"), "unrelated work\n");
+  await writeFile(join(frontend, "tracked.txt"), "session work\n");
+  const snapshot = await ledger.captureSnapshot();
+  assert.deepEqual(Object.keys(snapshot.files), ["frontend/tracked.txt"]);
+  assert.equal(ledger.repositories.length, 1);
+  const preview = await ledger.previewRollback(checkpoint.id);
+  assert.equal(preview.scope.stats.files, 1);
+  await mkdir(join(workspace, "another-sibling", ".git"), { recursive: true });
+  await ledger.rollback(preview, { confirmed: true }, 1);
+  assert.equal(await readFile(join(backend, "tracked.txt"), "utf8"), "unrelated work\n");
+
+  // Even enough extra candidates to exceed the discovery limit must not affect a pinned session.
+  for (let index = 0; index < 33; index += 1) await mkdir(join(workspace, `extra-${index}`, ".git"), { recursive: true });
+  const reopened = new ChangedFilesLedger(fakePi(), "session-membership", workspace, cache);
+  await reopened.initialize();
+  assert.deepEqual(reopened.repositories.map((repository) => repository.name), ["frontend"]);
+  assert.deepEqual(Object.keys((await reopened.captureSnapshot()).files), ["frontend/tracked.txt"]);
+});
+
+test("still rejects a selected repository that disappears or becomes a symlink", async () => {
+  const workspace = await temporaryDirectory("pi-ledger-workspace-missing-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  const frontend = join(workspace, "frontend");
+  await mkdir(frontend);
+  await initRepo(frontend);
+  const ledger = new ChangedFilesLedger(fakePi(), "session-missing", workspace, cache);
+  await ledger.initialize();
+  await rm(join(frontend, ".git"), { recursive: true });
+  await assert.rejects(ledger.captureSnapshot(), /selected workspace repository frontend is missing/);
+  const reopened = new ChangedFilesLedger(fakePi(), "session-missing", workspace, cache);
+  await assert.rejects(reopened.initialize(), /selected workspace repository frontend is missing/);
+  await rm(frontend, { recursive: true });
+  const outside = await temporaryDirectory("pi-ledger-outside-");
+  await initRepo(outside);
+  await symlink(outside, frontend);
+  await assert.rejects(ledger.captureSnapshot(), /selected workspace repository frontend is missing/);
 });
 
 test("restores all affected repositories from a composite checkpoint and verifies namespaced state", async () => {
@@ -300,7 +335,7 @@ test("preflights every repository before restore and creates no partial safety p
   const checkpointCount = ledger.listCheckpoints().length;
   await rm(join(backend, ".git"), { recursive: true, force: true });
 
-  await assert.rejects(ledger.rollback(preview, { confirmed: true }, 4), /workspace repository membership changed/);
+  await assert.rejects(ledger.rollback(preview, { confirmed: true }, 4), /selected workspace repository backend is missing/);
   assert.equal(ledger.listCheckpoints().length, checkpointCount);
   assert.equal(await readFile(join(frontend, "tracked.txt"), "utf8"), "frontend current\n");
   assert.equal(await readFile(join(backend, "tracked.txt"), "utf8"), "backend current\n");

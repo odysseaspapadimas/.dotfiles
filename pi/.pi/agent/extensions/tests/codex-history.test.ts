@@ -6,7 +6,8 @@ import {
 	dailyHistoryText, dailyPiCodexTokens, dailyQuota, loadQuotaSamples, localDay, quotaHistoryFile, recordQuotaSample,
 } from "../quota/history.ts";
 
-// Run with TZ=UTC to make the local-day tests deterministic.
+// These fixtures cross midnight in UTC, independent of the machine timezone.
+process.env.TZ = "UTC";
 const root = await mkdtemp(join(tmpdir(), "pi-codex-history-"));
 const resetAt = Date.UTC(2026, 8, 28, 10) / 1000;
 try {

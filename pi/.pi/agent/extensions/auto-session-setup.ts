@@ -7,8 +7,8 @@
  * 3. Updates the terminal title and current Herdr tab label
  */
 
-import type { ExtensionAPI, Model } from "@earendil-works/pi-coding-agent";
-import type { Api, TextContent } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Api, Model, TextContent } from "@earendil-works/pi-ai";
 
 export default function (pi: ExtensionAPI) {
 	// A side chat is a split pane inside its source tab. It must not rename the
@@ -17,23 +17,17 @@ export default function (pi: ExtensionAPI) {
 
 	let isFirstMessage = true;
 	let targetModel: Model<Api> | undefined;
+	let generation = 0;
+	let namingAbort: AbortController | undefined;
 
-	/**
-	 * Set the terminal tab/window title using standard OSC escape sequence.
-	 * Works in cmux, Ghostty, iTerm2, and most modern terminals.
-	 */
-	function setTabTitle(title: string): void {
-		try {
-			// OSC 0 sets both icon name and window title
-			process.stdout.write(`\x1b]0;${title}\x07`);
-		} catch {
-			// Silently ignore if stdout is not writable
-		}
+	// Never emit terminal escapes into JSON/RPC output, even on a TTY.
+	function setTabTitle(title: string, ctx: ExtensionContext): void {
+		if (ctx.mode === "tui") ctx.ui.setTitle(title);
 	}
 
-	async function setHerdrTabName(name: string): Promise<void> {
+	async function setHerdrTabName(name: string, ctx: ExtensionContext): Promise<void> {
 		const tabId = process.env.HERDR_TAB_ID;
-		if (process.env.HERDR_ENV !== "1" || !tabId) return;
+		if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !tabId) return;
 		const result = await pi.exec("herdr", ["tab", "rename", tabId, name], { timeout: 5_000 });
 		if (result.code !== 0) {
 			throw new Error(result.stderr.trim() || result.stdout.trim() || "Herdr tab rename failed");
@@ -42,6 +36,9 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Reset state and find the model for session naming ────────────────
 	pi.on("session_start", (event, ctx) => {
+		generation++;
+		namingAbort?.abort();
+		namingAbort = undefined;
 		// Only auto-name truly empty/new sessions. On /reload the extension runtime
 		// is recreated, so the module-level default would otherwise make the next
 		// user message look like the first message and rename an existing session.
@@ -74,16 +71,20 @@ export default function (pi: ExtensionAPI) {
 		const userMessage = event.prompt?.trim();
 		if (!userMessage) return;
 
+		const requestGeneration = generation;
+
 		// Set a temporary name immediately so the user sees something
 		const tempName = userMessage.split("\n")[0].trim().slice(0, 60);
 		pi.setSessionName(tempName);
-		setTabTitle(`${tempName} — pi`);
-		void setHerdrTabName(tempName).catch((error) => {
+		setTabTitle(`${tempName} — pi`, ctx);
+		void setHerdrTabName(tempName, ctx).catch((error) => {
+			if (requestGeneration !== generation) return;
 			ctx.ui.notify(`Could not rename Herdr tab: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		});
 
 		// Fire off the model call in the background — don't block the agent
 		if (targetModel) {
+			namingAbort = new AbortController();
 			ctx.modelRegistry
 				.complete(
 					targetModel,
@@ -101,13 +102,14 @@ export default function (pi: ExtensionAPI) {
 					},
 					// Console Go requires this routing header for nested model calls.
 					{
+						signal: namingAbort.signal,
 						maxTokens: 2_048,
 						reasoning: "low",
 						headers: { "x-opencode-session": ctx.sessionManager.getSessionId() },
 					},
 				)
 				.then((result) => {
-					if (!result) return;
+					if (!result || requestGeneration !== generation) return;
 					const text = result.content
 						.filter((b): b is TextContent => b.type === "text")
 						.map((b) => b.text)
@@ -126,17 +128,27 @@ export default function (pi: ExtensionAPI) {
 
 					// Update the session name and titles with the model-generated name.
 					pi.setSessionName(name);
-					setTabTitle(`${name} — pi`);
-					return setHerdrTabName(name);
+					setTabTitle(`${name} — pi`, ctx);
+					return setHerdrTabName(name, ctx);
 				})
 				.catch((error) => {
+					if (requestGeneration !== generation) return;
 					ctx.ui.notify(
 						`Session naming with deepseek-v4.1-flash failed; keeping the prompt fallback: ${error instanceof Error ? error.message : String(error)}`,
 						"warning",
 					);
+				})
+				.finally(() => {
+					if (requestGeneration === generation) namingAbort = undefined;
 				});
 		} else {
 			ctx.ui.notify("deepseek-v4.1-flash is unavailable; keeping the prompt fallback name", "warning");
 		}
+	});
+
+	pi.on("session_shutdown", () => {
+		generation++;
+		namingAbort?.abort();
+		namingAbort = undefined;
 	});
 }

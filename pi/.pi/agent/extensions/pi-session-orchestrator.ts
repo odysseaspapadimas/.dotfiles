@@ -16,6 +16,7 @@ import { SessionStore, METADATA_TYPE, SETTLED_TYPE, metadataFor, canonicalPath,
   type SessionSnapshot, type SettledRun, textContent } from "./pi-sessions/store.ts";
 import { recall, conversationPage, excerpt } from "./pi-sessions/recall.ts";
 import { runState, waitWithSignal } from "./pi-sessions/runs.ts";
+import { Action, SessionOutput, type ActionName, type SessionResultDetails } from "./pi-sessions/output.ts";
 import { SessionMailbox, sendMailbox, mailboxStatus, mailboxPending, messageMarker,
   type MailboxIdentity, type DeliveryReceipt } from "./pi-sessions/mailbox.ts";
 import { basename, dirname, join, resolve } from "node:path";
@@ -62,33 +63,6 @@ function sessionDirectory(cwd: string): string {
 
 const SessionLifecycle = StringEnum(["persistent", "task"] as const);
 const ThinkingLevel = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
-
-const Action = StringEnum([
-  "create",
-  "list",
-  "recall",
-  "status",
-  "read",
-  "send",
-  "watch",
-  "focus",
-  "stop",
-  "resume",
-  "rename",
-] as const);
-
-type ActionName =
-  | "create"
-  | "list"
-  | "recall"
-  | "status"
-  | "read"
-  | "send"
-  | "watch"
-  | "focus"
-  | "stop"
-  | "resume"
-  | "rename";
 
 interface HerdrAgentSession {
   kind?: "id" | "path" | string;
@@ -203,10 +177,13 @@ function formatAge(timestamp: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function toolResult(text: string, details: unknown = {}) {
+function sessionToolResult(action: ActionName, text: string, details: SessionResultDetails = {}) {
   const bounded = truncateHead(text, { maxBytes: 32 * 1024, maxLines: 1000 });
-  return { content: [{ type: "text" as const, text: bounded.content + (bounded.truncated
-    ? "\n[Output truncated. Use a smaller limit, pagination, or read the referenced session file.]" : "") }], details };
+  const output = bounded.content + (bounded.truncated
+    ? "\n[Output truncated. Use a smaller limit, pagination, or read the referenced session file.]" : "");
+  // Optional properties must be omitted, not undefined, at the JSON boundary.
+  const structuredContent = JSON.parse(JSON.stringify({ ...details, action, output, truncated: bounded.truncated }));
+  return { content: [{ type: "text" as const, text: output }], details, structuredContent };
 }
 
 function addRuntime(map: Map<string, HerdrPane[]>, key: string, pane: HerdrPane): void {
@@ -310,9 +287,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     const metadata = metadataFor(ctx.sessionManager);
     if (!metadata || metadata.createdBy !== TOOL_NAME) return;
     const depth = Math.max(1, metadata.delegationDepth ?? 1);
-    return {
-      systemPrompt: `${event.systemPrompt}\n\nOrchestration: this session owns its assigned task (delegation depth ${depth}); work primarily here, and delegate only clearly separable subtasks—not the whole assignment.`,
-    };
+    event.systemPromptOptions.sections.session_orchestration =
+      `Orchestration: this session owns its assigned task (delegation depth ${depth}); work primarily here, and delegate only clearly separable subtasks—not the whole assignment.`;
   });
 
   async function herdr(args: string[], signal?: AbortSignal): Promise<HerdrResponse> {
@@ -902,6 +878,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
   pi.registerTool({
     name: TOOL_NAME,
     label: "Pi Sessions",
+    outputSchema: SessionOutput,
     description:
       "Recall, discover, and manage local Pi sessions. recall searches dated transcript excerpts by topic, or shows recent activity when query is omitted. list/read are paginated; output is bounded to 32KB/1000 lines. focus only focuses an existing runtime. resume launches a stopped session; omit message to reopen without prompting the model. A resume message creates a new user turn and may immediately start work. send uses a draft-safe mailbox for running sessions (queues when busy) and launches if stopped. New sessions receive only their explicit starting message plus normal project context, not this conversation. Reserve creation for substantial independent work or explicit requests. Ambiguous lookups and unsafe cross-session operations are rejected.",
     promptSnippet: "Recall past work and safely manage local Pi sessions",
@@ -965,6 +942,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     },
     async execute(_toolCallId, params: ToolParams, signal, onUpdate, ctx) {
       signal?.throwIfAborted();
+      const toolResult = (text: string, details: SessionResultDetails = {}) => sessionToolResult(params.action, text, details);
       const limit = Math.max(1, Math.min(100, params.limit ?? 20));
       const offset = Math.max(0, params.offset ?? 0);
       const startMonitor = (session: ManagedSession) => {
@@ -1003,7 +981,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
             "Historical excerpts, not verified current task status. Read with id=session path, cursor=entry ID. Check later work before proposing follow-ups.",
             rows.join("\n\n") || "No local Pi sessions matched. Try broader keywords or a wider date range.",
             result.nextOffset !== undefined ? `Next: recall with offset=${result.nextOffset} and the same filters.` : "",
-          ].filter(Boolean).join("\n\n"), { ...result, after, before });
+          ].filter(Boolean).join("\n\n"), { ...result, after, before, offset, limit: Math.min(20, params.limit ?? 10) });
         }
         case "list": {
           const createdAfter = parseDateFilter(params.createdAfter, "createdAfter");
@@ -1034,7 +1012,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const nextOffset = offset + details.length < matches.length ? offset + details.length : undefined;
           return toolResult([rows.join("\n") || "No local Pi sessions matched.",
             `${details.length} of ${matches.length} sessions.${nextOffset !== undefined ? ` Next: list with offset=${nextOffset} and the same filters.` : ""}`].join("\n"),
-            { sessions: details, total: matches.length, nextOffset });
+            { sessions: details, total: matches.length, nextOffset, offset, limit });
         }
         case "status": {
           const session = await resolveSession(params.id, signal);
@@ -1065,7 +1043,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const session = await resolveSession(params.id, signal);
           const page = conversationPage(await store.load(session.sessionPath, signal), limit, params.cursor);
           return toolResult(`${page.text}${page.nextCursor ? `\n\nNext: read id=${session.sessionPath} cursor=${page.nextCursor}` : ""}`,
-            { session, limit, nextCursor: page.nextCursor, total: page.total });
+            { session, messages: page.messages, limit, nextCursor: page.nextCursor, total: page.total });
         }
         case "send": {
           const message = params.message?.trim();

@@ -1,7 +1,8 @@
 # Codex Fast Mode
 
 A small Pi extension that enables OpenAI Codex Fast Mode by combining Pi's
-native `serviceTier: "priority"` support with the Codex WebSocket originator
+native provider with a `before_provider_request` hook that adds
+`service_tier: "priority"`, and the Codex WebSocket originator
 identifier (`originator: "codex_cli_rs"`) required by the ChatGPT OAuth backend.
 
 ## Usage
@@ -28,6 +29,10 @@ Only ChatGPT-authenticated `openai-codex` requests are changed:
 - `gpt-5.6-luna`
 - `gpt-5.6-sol`
 - `gpt-5.6-terra`
+- `gpt-6-astra`
+- `gpt-6-luna`
+- `gpt-6-sol`
+- `gpt-6.1-sol`
 
 Codex Spark and mini models are deliberately left unchanged. The extension
 does not affect the API-key-backed `openai` provider, avoiding accidental API

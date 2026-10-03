@@ -11,7 +11,7 @@ import {
 
 test("side-chat context identifies the boundary and shared working directory", () => {
   const snapshotAt = Date.parse("2026-08-04T12:00:00.000Z");
-  const notice = sideChatContextNotice("leaf-123", snapshotAt);
+  const notice = sideChatContextNotice();
   const boundary = sideChatBoundaryMessage("leaf-123", snapshotAt);
 
   assert.match(notice, /separate assistant instance/);
@@ -19,7 +19,7 @@ test("side-chat context identifies the boundary and shared working directory", (
   assert.match(notice, /did not participate/);
   assert.match(notice, /Only user turns after the side-chat boundary are active instructions/);
   assert.match(notice, /main assistant.*never to yourself/);
-  assert.match(notice, /leaf leaf-123 at 2026-08-04T12:00:00.000Z/);
+  assert.doesNotMatch(notice, /leaf-123|2026-08-04/);
   assert.match(notice, /working directory is shared/);
   assert.match(notice, /Treat current file contents as authoritative/);
   assert.match(notice, /Never revert, overwrite, or restore/);

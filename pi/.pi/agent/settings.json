@@ -1,8 +1,11 @@
 {
-  "lastChangelogVersion": "0.99.0",
+  "lastChangelogVersion": "1.0.0",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-6-sol",
-  "defaultThinkingLevel": "low",
+  "defaultModel": "gpt-6.1-sol",
+  "defaultThinkingLevel": "xhigh",
+  "defaultTools": [
+    "+codemode"
+  ],
   "hideThinkingBlock": false,
   "theme": "catppuccin-mocha",
   "packages": [
@@ -23,5 +26,7 @@
   "tuiMode": "fullscreen",
   "fullscreenScrollbar": "auto",
   "showCacheMissNotices": true,
-  "fullscreenCopyOnSelect": true
+  "fullscreenCopyOnSelect": true,
+  "cacheWarming": "idle",
+  "deviceId": "f7c1e44d-cf24-4e07-86e0-a2e9b01a7ea4"
 }

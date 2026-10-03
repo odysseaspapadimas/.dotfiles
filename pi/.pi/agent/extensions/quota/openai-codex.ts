@@ -17,7 +17,7 @@
  *   /codex-quota json     Show normalized JSON
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -380,7 +380,7 @@ function isOpenAICodexModel(model: { provider: string; id: string } | undefined)
 export default function (pi: ExtensionAPI) {
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 	let isActive = false;
-	let capturedUi: { setStatus: (key: string, text: string | undefined) => void; theme: { fg: (color: string, text: string) => string } } | null = null;
+	let capturedUi: Pick<ExtensionUIContext, "setStatus" | "theme"> | null = null;
 
 	async function refresh(force = false, signal?: AbortSignal): Promise<void> {
 		const result = await fetchCodexUsage(force, signal);

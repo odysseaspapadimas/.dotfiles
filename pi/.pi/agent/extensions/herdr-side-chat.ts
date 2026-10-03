@@ -163,7 +163,7 @@ export function hasUnhandedWork(localCount: number, handedOffLocalCount: number)
   return localCount > handedOffLocalCount;
 }
 
-export function sideChatContextNotice(sourceLeaf: string | undefined, snapshotAt: number): string {
+export function sideChatContextNotice(): string {
   return `## Side-chat role and provenance
 
 You are a separate assistant instance in an ephemeral side chat. Your purpose is to handle a focused tangent, question, review, or parallel task without automatically continuing the main chat.
@@ -174,7 +174,6 @@ The main-chat transcript is supplied only as background reference. You did not p
 - Attribute inherited decisions, claims, tool calls, and file changes to "the main chat" or "the main assistant", never to yourself.
 - Use "I" or "we" for actions taken in this side chat only. When reporting status, explicitly separate main-chat work from side-local work.
 - If the local request does not establish a clear side task, ask what tangent or parallel task the user wants help with instead of inferring an assignment from inherited history.
-- The side chat began from source session leaf ${sourceLeaf ?? "(unknown)"} at ${new Date(snapshotAt).toISOString()}.
 - The working directory is shared with the main chat. Files may have changed since the inherited snapshot, including changes made concurrently by the main chat.
 - You may inspect and modify files when the local user asks. Do not default to discussion-only behavior merely because this is a side chat.
 - Treat current file contents as authoritative. Do not assume differences between inherited context and the current filesystem are mistakes.
@@ -680,13 +679,20 @@ export default function herdrSideChat(pi: ExtensionAPI) {
         );
         if (checkpointIndex >= 0) {
           const checkpoint = entries[checkpointIndex]!;
-          const details = checkpoint.type === "compaction" ? checkpoint.details : checkpoint.data;
+          const details = checkpoint.type === "compaction" ? checkpoint.details : checkpoint.type === "custom" ? checkpoint.data : undefined;
+          // The public context is read-only. Pi 1.0 still supplies its concrete
+          // manager; use it only to seed this empty, non-persistent side session
+          // before the first prompt. Never write through a persisted main session.
+          const sideSession = ctx.sessionManager;
+          if (!(sideSession instanceof SessionManager) || sideSession.getSessionFile()) {
+            throw new Error("Native checkpoint inheritance requires an in-memory Pi session manager");
+          }
           pi.appendEntry("openai-codex-native-compaction", details);
           for (const entry of entries.slice(checkpointIndex + 1)) {
             if (entry.type === "message" && entry.message.role !== "compactionSummary" && entry.message.role !== "branchSummary") {
-              ctx.sessionManager.appendMessage(entry.message);
+              sideSession.appendMessage(entry.message);
             } else if (entry.type === "custom_message") {
-              ctx.sessionManager.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
+              sideSession.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
             }
           }
           inheritedNativeCheckpoint = true;
@@ -703,9 +709,10 @@ export default function herdrSideChat(pi: ExtensionAPI) {
     });
 
     pi.on("before_agent_start", (event) => {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n${sideChatContextNotice(sourceLeaf, sourceSnapshotAt)}`,
-      };
+      // Keep stable role guidance separate from metadata changed by /side:refresh.
+      event.systemPromptOptions.sections.side_chat_provenance = sideChatContextNotice();
+      event.systemPromptOptions.sections.side_chat_snapshot =
+        `## Side-chat snapshot\n\n- The side chat began from source session leaf ${sourceLeaf ?? "(unknown)"} at ${new Date(sourceSnapshotAt).toISOString()}.`;
     });
 
     pi.on("context", (event) => {

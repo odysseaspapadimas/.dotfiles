@@ -19,6 +19,7 @@ const { SessionStore, textContent } = await import("../pi-sessions/store.ts");
 const { SessionMailbox, mailboxPending, sendMailbox } = await import("../pi-sessions/mailbox.ts");
 const { recall, conversationPage } = await import("../pi-sessions/recall.ts");
 const { runState } = await import("../pi-sessions/runs.ts");
+const { Value } = await import("typebox/value");
 
 assert.deepEqual(parseModelOverride("openai-codex/gpt-5.6-luna"), {
   provider: "openai-codex",
@@ -151,6 +152,7 @@ function appendExchange(path: string, prompt: string): void {
   manager.appendMessage({
     role: "assistant",
     content: [{ type: "text", text: `reply: ${prompt.replace(/^\[pi_sessions:[^\]]+\]\n/u, "")}` }],
+    api: "openai-responses",
     provider: "test",
     model: "model",
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
@@ -196,12 +198,12 @@ const fakePi: any = {
           (entry: any) => entry.type === "message" && entry.message.role === "assistant",
         );
         const metadata = SessionManager.open(match[1]).getEntries().findLast(
-          (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+          (entry): entry is import("@earendil-works/pi-coding-agent").CustomEntry<any> => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
         )?.data;
         assert.match(text, new RegExp(`--provider '${hasAssistant ? "test" : metadata.initialProvider}'`));
         assert.match(text, new RegExp(`--model '${hasAssistant ? "model" : metadata.initialModel}'`));
         const metadataForThinking = SessionManager.open(match[1]).getEntries().findLast(
-          (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+          (entry): entry is import("@earendil-works/pi-coding-agent").CustomEntry<any> => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
         )?.data;
         assert.match(text, new RegExp(`--thinking '${metadataForThinking?.initialThinking ?? "medium"}'`));
         pane.agent = "pi";
@@ -244,12 +246,16 @@ const fakePi: any = {
   },
 };
 
-function execute(params: Record<string, unknown>, sessionManager?: InstanceType<typeof SessionManager>) {
-  return registered.execute("test-call", params, undefined, undefined, {
+async function execute(params: Record<string, unknown>, sessionManager?: import("@earendil-works/pi-coding-agent").SessionManager) {
+  const result = await registered.execute("test-call", params, undefined, undefined, {
     cwd: root,
     model: { provider: "test-provider", id: "test-model" },
     sessionManager,
   });
+  assert.ok(Value.Check(registered.outputSchema, result.structuredContent), `Invalid structured result for ${params.action}`);
+  assert.equal(result.structuredContent.action, params.action);
+  assert.equal(result.structuredContent.output, result.content[0].text);
+  return result;
 }
 
 try {
@@ -258,7 +264,7 @@ try {
   legacy.appendSessionInfo("Legacy");
   const legacyPath = legacy.getSessionFile()!;
   await mkdir(dirname(legacyPath), { recursive: true });
-  await writeFile(legacyPath, `${[legacy.getHeader(), ...legacy.getEntries()].map(JSON.stringify).join("\n")}\n`);
+  await writeFile(legacyPath, `${[legacy.getHeader(), ...legacy.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
   const registryPath = join(agentDir, "pi-session-orchestrator", "registry.json");
   await mkdir(dirname(registryPath), { recursive: true });
   await writeFile(registryPath, JSON.stringify({ version: 1, sessions: { dir_legacy: { id: "dir_legacy", name: "Legacy", sessionPath: legacyPath, createdAt: Date.now(), provider: "test-provider", model: "test-model", thinking: "medium" } } }));
@@ -282,7 +288,7 @@ try {
   external.appendSessionInfo("External review");
   const externalPath = external.getSessionFile()!;
   await mkdir(dirname(externalPath), { recursive: true });
-  await writeFile(externalPath, `${[external.getHeader(), ...external.getEntries()].map(JSON.stringify).join("\n")}\n`);
+  await writeFile(externalPath, `${[external.getHeader(), ...external.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
   appendExchange(externalPath, "ordinary session");
 
   // Recall is local, dated, ranked and directly readable; it does not need a runtime.
@@ -299,6 +305,8 @@ try {
   const evidence = result.details.hits[0].evidence[0];
   result = await execute({ action: "read", id: externalPath, cursor: evidence.entryId, limit: 1 });
   assert.match(result.content[0].text, /piSession recall/);
+  assert.equal(result.structuredContent.messages[0].id, evidence.entryId);
+  assert.match(result.structuredContent.messages[0].text, /piSession recall/);
   assert.equal(herdrCalls.length, callCount, "recall and path reads must not call Herdr");
   const date = (await history.load(externalPath)).messages[0].timestamp;
   const excluded = await recall(history, { query: "ordinary", before: date, limit: 10, offset: 0 });
@@ -319,7 +327,7 @@ try {
     const page = conversationPage(oversized, 1, cursor);
     assert.ok(Buffer.byteLength(page.text) < 32 * 1024);
     assert.ok(page.text.split("\n").length < 1000);
-    restored += page.text.slice(page.text.indexOf("\n") + "\nAssistant: ".length);
+    restored += page.messages[0].text;
     assert.notEqual(page.nextCursor, cursor, "pagination must make progress");
     cursor = page.nextCursor;
   } while (cursor);
@@ -378,16 +386,16 @@ try {
     sessionId: external.getSessionId(), sessionPath: externalPath, paneId: externalPane.pane_id,
   }), true, "queued messages must prevent automatic task cleanup");
   result = await execute({ action: "status", id: externalPath, messageId: queuedId });
-  assert.equal(result.details.delivery.state, "queued");
-  assert.equal(result.details.outcome, undefined, "status must not report the previous run as this request's outcome");
+  assert.equal(result.structuredContent.delivery.state, "queued");
+  assert.equal("outcome" in result.structuredContent, false, "status must not report the previous run as this request's outcome");
   result = await execute({ action: "watch", id: externalPath, messageId: queuedId, timeoutSeconds: 1 });
   assert.equal(result.details.timedOut, true, "watch must not mistake the preceding run for this queued request");
   assert.equal(mailboxDeliveries, countAfterAccepted);
   externalPane.agent_status = "idle";
   receivers.get(externalPane.pane_id)!.wake();
   result = await execute({ action: "watch", id: externalPath, messageId: queuedId, timeoutSeconds: 1 });
-  assert.equal(result.details.outcome, "completed");
-  assert.match(result.details.latest.text, /queued behind current run/);
+  assert.equal(result.structuredContent.outcome, "completed");
+  assert.match(result.structuredContent.latest.text, /queued behind current run/);
   assert.equal(drafts.get(externalPane.pane_id), "unfinished user draft — leave this alone");
 
   externalPane.agent_status = "working";
@@ -459,18 +467,22 @@ try {
   assert.equal(created.sessionPath.startsWith(join(sideAgentDir, "sessions")), false);
   assert.match(result.content[0].text, /Starting message sent/);
   const createdMetadata = SessionManager.open(created.sessionPath).getEntries().findLast(
-    (entry: any) => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
+    (entry): entry is import("@earendil-works/pi-coding-agent").CustomEntry<any> => entry.type === "custom" && entry.customType === "pi-session-orchestrator",
   )?.data;
   assert.equal(createdMetadata.parentSessionId, external.getSessionId());
   assert.equal(createdMetadata.delegationDepth, 1);
   assert.equal(createdMetadata.initialProvider, "openai-codex");
   assert.equal(createdMetadata.initialModel, "gpt-5.6-luna");
-  const promptEvent = eventHandlers.get("before_agent_start")?.(
-    { systemPrompt: "base prompt" },
-    { sessionManager: SessionManager.open(created.sessionPath) },
-  ) as { systemPrompt?: string };
-  assert.match(promptEvent.systemPrompt ?? "", /owns its assigned task \(delegation depth 1\)/);
-  assert.doesNotMatch(promptEvent.systemPrompt ?? "", /User:|Assistant:/);
+  const promptOptions: { sections: Record<string, string>; forceSystemPrompt?: string } = { sections: { existing: "Keep other extension guidance" } };
+  const promptEvent = { systemPrompt: "base prompt", systemPromptOptions: promptOptions };
+  assert.equal(eventHandlers.get("before_agent_start")?.(promptEvent,
+    { sessionManager: SessionManager.open(created.sessionPath) }), undefined);
+  assert.match(promptOptions.sections.session_orchestration, /owns its assigned task \(delegation depth 1\)/);
+  assert.equal(promptOptions.sections.existing, "Keep other extension guidance");
+  assert.equal(promptOptions.forceSystemPrompt, undefined);
+  const ordinaryPrompt = { systemPromptOptions: { sections: {} } };
+  eventHandlers.get("before_agent_start")?.(ordinaryPrompt, { sessionManager: external });
+  assert.deepEqual(ordinaryPrompt.systemPromptOptions.sections, {});
 
   result = await execute({ action: "list" });
   assert.match(result.content[0].text, /Lifecycle/);

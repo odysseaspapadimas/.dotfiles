@@ -66,7 +66,7 @@ function buildHelpLines(theme: Theme, width: number): string[] {
   ];
 
   const innerWidth = width - 2;
-  const title = theme.fg("accent", theme.bold(" Ctrl+X shortcuts "));
+  const title = truncateToWidth(theme.fg("accent", theme.bold(" Ctrl+X shortcuts ")), width - 3, "");
   const titleWidth = visibleWidth(title);
   const top = border("╭─") + title + border("─".repeat(Math.max(0, width - titleWidth - 3)) + "╮");
   const bottom = border("╰" + "─".repeat(innerWidth) + "╯");

@@ -1,0 +1,9 @@
+{
+  "name": "dotfiles-pi-extensions",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import ./tests/pi-host.mjs --test tests/*.test.ts changed-files-ledger/test/*.test.ts",
+    "typecheck": "node ./tests/typecheck.mjs"
+  }
+}
