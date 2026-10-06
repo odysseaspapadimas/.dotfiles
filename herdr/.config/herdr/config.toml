@@ -169,3 +169,11 @@ key = "prefix+shift+m"
 type = "plugin_action"
 command = "edi.layout-tools.reshape-main-grid"
 description = "focused pane main-left with grid"
+
+[[keys.command]]
+key = "prefix+shift+b"
+type = "popup"
+command = "/bin/sh \"$HOME/.config/herdr/popup-env\" dispatch board"
+width = "90%"
+height = "90%"
+description = "Dispatch workboard"

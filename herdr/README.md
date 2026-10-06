@@ -32,6 +32,10 @@ The wrapper:
 
 Use this wrapper for future local popup binaries. System commands that neither live in a user path nor call Herdr do not require it.
 
+## Dispatch
+
+`prefix+shift+b` (`Ctrl+Space`, then `Shift+B`) opens Dispatch in a 90% modal popup. The command uses `popup-env` to restore the local launcher environment. Install Dispatch on that machine first; the shortcut replaces the former `prefix+shift+d` overlay.
+
 ## Project scratch
 
 `prefix+p` opens the standalone `project-scratch` editor for the current Git root (or cwd outside Git). Notes are private state under `${XDG_STATE_HOME:-~/.local/state}/herdr/project-scratch/` and are available from any pane without Pi. Existing notes from Pi's former scratch extension are copied forward on first use. `F2` previews and promotes the selection or complete scratch to `.agents/project-journal.md`; `F8` clears after confirmation.
