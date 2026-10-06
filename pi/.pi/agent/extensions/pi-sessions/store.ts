@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 export const METADATA_TYPE = "pi-session-orchestrator";
 export const SETTLED_TYPE = "pi-session-run-settled";
+export const REPORT_TYPE = "pi-session-report";
 export type SessionMetadataReader = Pick<SessionManager, "getHeader" | "getEntries">;
 export interface OrchestratorMetadata {
   version?: number;
@@ -37,7 +38,7 @@ export interface ManagedSession {
 }
 export interface TranscriptEntry {
   id: string;
-  role: "user" | "assistant" | "summary";
+  role: "user" | "assistant" | "report" | "summary";
   text: string;
   timestamp: number;
   stopReason?: string;
@@ -136,6 +137,8 @@ export class SessionStore {
         messages.push({ id: entry.id, role: message.role, text: textContent(message.content),
           timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.parse(entry.timestamp),
           ...(message.role === "assistant" ? { stopReason: message.stopReason } : {}) });
+      } else if (entry.type === "custom_message" && entry.customType === REPORT_TYPE) {
+        messages.push({ id: entry.id, role: "report", text: textContent(entry.content), timestamp: Date.parse(entry.timestamp) });
       } else if (entry.type === "compaction" || entry.type === "branch_summary") {
         messages.push({ id: entry.id, role: "summary", text: entry.summary, timestamp: Date.parse(entry.timestamp) });
       }

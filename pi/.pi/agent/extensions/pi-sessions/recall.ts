@@ -103,7 +103,7 @@ export function conversationPage(snapshot: SessionSnapshot, limit: number, curso
   let nextCursor: string | undefined;
   for (let count = 0; index < entries.length && count < limit; index++, count++) {
     const entry = entries[index];
-    const heading = `[${entry.id} ${new Date(entry.timestamp).toISOString()}]\n${entry.role === "user" ? "User" : entry.role === "assistant" ? "Assistant" : "Summary"}: `;
+    const heading = `[${entry.id} ${new Date(entry.timestamp).toISOString()}]\n${entry.role === "user" ? "User" : entry.role === "assistant" ? "Assistant" : entry.role === "report" ? "Report" : "Summary"}: `;
     const capacity = remaining - heading.length - 2;
     if (capacity <= 0 || remainingLines <= 3) { nextCursor = `${entry.id}:${offset}`; break; }
     let end = Math.min(entry.text.length, offset + capacity);
@@ -124,5 +124,5 @@ export function conversationPage(snapshot: SessionSnapshot, limit: number, curso
     offset = 0;
   }
   if (!nextCursor && index < entries.length) nextCursor = `${entries[index].id}:0`;
-  return { text: lines.join("\n\n") || "(No user/assistant messages yet.)", messages, nextCursor, total: entries.length };
+  return { text: lines.join("\n\n") || "(No conversation messages yet.)", messages, nextCursor, total: entries.length };
 }

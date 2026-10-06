@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "1.0.0",
+  "lastChangelogVersion": "1.0.4",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-6.1-sol",
   "defaultThinkingLevel": "xhigh",
@@ -16,11 +16,16 @@
     "npm:@juicesharp/rpiv-todo",
     "npm:@ogulcancelik/pi-codex-compaction"
   ],
+  "extensions": [
+    "-extensions/herdr-agent-state.ts"
+  ],
   "quietStartup": false,
   "steeringMode": "one-at-a-time",
   "doubleEscapeAction": "tree",
   "terminal": {
-    "showTerminalProgress": true
+    "showTerminalProgress": true,
+    "showImages": true,
+    "images": "kitty"
   },
   "treeFilterMode": "no-tools",
   "tuiMode": "fullscreen",

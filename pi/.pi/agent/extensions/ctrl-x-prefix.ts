@@ -134,7 +134,7 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
         theme: EditorTheme,
         keybindings: KeybindingsManager,
       ) {
-        super(tui, theme, keybindings);
+        super(tui, theme, keybindings, { embedWorkingStatus: true });
       }
 
       dispose(): void {

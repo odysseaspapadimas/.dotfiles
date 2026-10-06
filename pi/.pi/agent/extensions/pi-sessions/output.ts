@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 
 export const Action = StringEnum([
-  "create", "list", "recall", "status", "read", "send", "watch", "focus", "stop", "resume", "rename",
+  "create", "list", "recall", "status", "read", "send", "report", "watch", "focus", "stop", "resume", "rename",
 ] as const);
 export type ActionName = Static<typeof Action>;
 
@@ -34,7 +34,7 @@ const Pane = Type.Object({
 });
 const Message = Type.Object({
   id: Type.String(),
-  role: StringEnum(["user", "assistant", "summary"] as const),
+  role: StringEnum(["user", "assistant", "report", "summary"] as const),
   text: Type.String(),
   timestamp: Type.Number({ description: "Unix milliseconds" }),
   stopReason: Type.Optional(Type.String()),

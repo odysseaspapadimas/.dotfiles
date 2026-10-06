@@ -44,8 +44,8 @@ unless bounded explicitly. `cwd` optionally narrows the project.
   relative bounds support `m`, `h`, `d`, and `w` (rolling durations, not calendar weeks).
 - `limit` defaults to 10, capped at 20 session hits. Continue using `nextOffset`
   with the same filters. These are live pages, not frozen snapshots.
-- Search covers user/assistant text and labeled branch/compaction summaries on
-  the active branch. It excludes tool results, thinking, images, and the current
+- Search covers user/assistant text, session reports, and labeled
+  branch/compaction summaries on the active branch. It excludes tool results, thinking, images, and the current
   session. It does not search abandoned branches or deleted files.
 - For planning, the agent should read relevant conversations, look for later
   resolutions, and distinguish suggested follow-ups from verified unfinished
@@ -92,6 +92,9 @@ for full reads. `read`/`recall` need no Herdr connection unless resolving a pane
   or submitted. Stopped sessions still launch with the CLI starting message.
   Self-send and duplicate-runtime guards remain in place. There is no terminal
   input fallback.
+- `report`: records an informational custom message in a running session without
+  triggering a model turn. Requires `id` and `message`, like `send`. Reports are
+  labeled with the source session and never launch stopped targets.
 - `resume`: launches a stopped session. Omit `message` when merely reopening it:
   this adds no transcript turn and does not prompt the model. Supplying `message`
   appends a new user turn and may immediately start model work, so use it only
@@ -127,13 +130,14 @@ not simulated keystrokes. Sockets live in the shared Pi agent directory's
 
 Running-session sends return a `messageId` and a receipt:
 
-- **queued**: the receiver owns the request, but no matching user entry has been
-  confirmed yet. Busy runs, native queued messages, and user-input dialogs take
-  precedence. Queueing does not interrupt the current run.
-- **accepted**: the matching user entry exists in the target session. This means
-  accepted, not completed. Each delivered prompt has a small `[pi_sessions:…]`
-  header for exact acknowledgment and retry deduplication. Slash commands and
-  prompt-template expansion are disabled for mailbox messages.
+- **queued**: the receiver owns the request, but no matching message entry has
+  been confirmed yet. Sends wait behind busy runs, native queued messages, and
+  user-input dialogs. Reports can be submitted while busy; Pi defers recording
+  until a safe boundary. Neither interrupts the current tool batch.
+- **accepted**: the matching user entry (send) or custom message (report) exists
+  in the target session. This means recorded, not acted on or completed. Each
+  message has a small `[pi_sessions:…]` header for exact acknowledgment and retry
+  deduplication. Slash commands and prompt-template expansion are disabled.
 - **unknown/error**: acceptance could not be verified. Never automatically
   inject it again. An ambiguous send error includes its `messageId`.
 
@@ -144,8 +148,8 @@ Follow the specific request, including its time waiting in the queue:
 {"action":"watch","id":"target-session","messageId":"<returned-message-id>","timeoutSeconds":300}
 ```
 
-For a lost acknowledgment, check status or repeat `send` with the **same
-messageId and exact message**. Accepted IDs are recoverable from transcript
+For a lost acknowledgment, check status or repeat `send`/`report` with the **same
+action, messageId and exact message**. Accepted IDs are recoverable from transcript
 entries. Reusing an ID for different content is rejected. Do not blindly retry
 with a new ID: the original may already have been accepted.
 
@@ -159,6 +163,30 @@ change. Cancelling a sender's wait does not retract an already queued message.
 Automatic task cleanup checks for pending mailbox messages before closing a
 runtime. Uncertain deliveries keep the task inspectable rather than triggering
 another injection or silent cleanup.
+
+## Informational reports
+
+```json
+{"action":"report","id":"parent-session","message":"Backend changes implemented; focused tests pass."}
+```
+
+Use `send` for instructions and `report` for updates that should not start more
+work. Reports reuse the existing mailbox, IDs, receipts and retry safety; there
+is no separate inbox, acknowledgment workflow, or automatic parent routing.
+
+The receiver calls Pi's `sendMessage()` with `triggerTurn: false`, even while
+busy. Pi inserts the custom message after the current turn's tool results are
+recorded. A naturally continuing agent sees it in its next model request; an
+idle or finishing agent is not prompted again. `queued` means recording is still
+pending, not that a response will follow. Reports leave editor drafts untouched.
+
+`status` with the report's `messageId` checks recording. `watch` with that ID
+waits only for recording and does not claim a completed model run. `read` shows
+reports separately from user prompts. Required worker results still need the
+normal worker `watch`; reporting does not guarantee immediate attention.
+
+Reload both sender and target to enable `report`. Missing receivers return an
+error, and stopped targets are never launched just to receive an update.
 
 ## Watching tasks
 
@@ -201,7 +229,9 @@ existing lifecycle behavior plus recall/date filters, cache invalidation,
 bounded lossless reads, safe pane cleanup, watch timeouts and durable completion.
 Mailbox checks cover discovered/busy targets, exact request watching, idempotent
 retries, stale receivers/session switches, direct Pi API delivery without editor
-access, and the retained self-send/duplicate-runtime guards.
+access, and the retained self-send/duplicate-runtime guards. Report checks cover
+non-triggering custom messages, busy-time delivery behind queued prompts,
+deferred-recording receipts, reload-safe retries, and stopped-target rejection.
 Run the standalone TypeScript test with Node/Jiti or Bun and Pi's SDK/package
 aliases. It was validated with Node/Jiti against the installed bundled SDK;
 Herdr is simulated, so the tests do not open or close real sessions.

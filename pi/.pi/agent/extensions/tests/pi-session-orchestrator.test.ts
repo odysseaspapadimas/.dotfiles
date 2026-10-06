@@ -15,8 +15,8 @@ process.env.PI_SESSIONS_PROMPT_ACCEPT_TIMEOUT_MS = "100";
 
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 const { default: orchestrator, parseModelOverride, sideSharedAgentDirectory } = await import("../pi-session-orchestrator.ts");
-const { SessionStore, textContent } = await import("../pi-sessions/store.ts");
-const { SessionMailbox, mailboxPending, sendMailbox } = await import("../pi-sessions/mailbox.ts");
+const { SessionStore, REPORT_TYPE, textContent } = await import("../pi-sessions/store.ts");
+const { SessionMailbox, mailboxPending, mailboxStatus, sendMailbox } = await import("../pi-sessions/mailbox.ts");
 const { recall, conversationPage } = await import("../pi-sessions/recall.ts");
 const { runState } = await import("../pi-sessions/runs.ts");
 const { Value } = await import("typebox/value");
@@ -44,6 +44,7 @@ const panes = new Map<string, Pane>();
 const receivers = new Map<string, InstanceType<typeof SessionMailbox>>();
 const drafts = new Map<string, string>();
 let mailboxDeliveries = 0;
+let reportDeliveries = 0;
 
 async function startReceiver(path: string, pane: Pane) {
   await receivers.get(pane.pane_id)?.close();
@@ -53,13 +54,22 @@ async function startReceiver(path: string, pane: Pane) {
     isIdle: () => pane.agent_status === "idle" || pane.agent_status === "done",
     hasPendingMessages: () => false,
     findAccepted: (messageId) => {
-      for (const entry of SessionManager.open(path).getEntries()) {
-        if (entry.type !== "message" || entry.message.role !== "user") continue;
-        const content = textContent(entry.message.content);
-        if (content.startsWith(`[pi_sessions:${messageId}]\n`)) return { entryId: entry.id, content };
+      for (const entry of SessionManager.open(path).getBranch()) {
+        if (entry.type === "custom_message" && entry.customType === REPORT_TYPE) {
+          const content = textContent(entry.content);
+          if (content.startsWith(`[pi_sessions:${messageId}]\n`)) return { entryId: entry.id, content, action: "report" };
+        } else if (entry.type === "message" && entry.message.role === "user") {
+          const content = textContent(entry.message.content);
+          if (content.startsWith(`[pi_sessions:${messageId}]\n`)) return { entryId: entry.id, content, action: "send" };
+        }
       }
     },
-    deliver: (content) => {
+    deliver: (content, action) => {
+      if (action === "report") {
+        reportDeliveries++;
+        SessionManager.open(path).appendCustomMessageEntry(REPORT_TYPE, content, true);
+        return;
+      }
       mailboxDeliveries++;
       pane.agent_status = "working";
       appendExchange(path, content);
@@ -278,6 +288,8 @@ try {
   );
   assert.ok(registered.promptGuidelines.some((guideline: string) =>
     guideline.includes("call resume without message, then focus")));
+  assert.ok(Value.Check(registered.parameters, { action: "report", id: "target", message: "update" }));
+  assert.ok(registered.promptGuidelines.some((guideline: string) => guideline.includes("Use report")));
   let result = await execute({ action: "list" });
   assert.match(result.content[0].text, /dir_legacy/);
   await assert.rejects(readFile(registryPath), /ENOENT/);
@@ -363,6 +375,8 @@ try {
     execute({ action: "send", id: external.getSessionId(), message: "unsafe draft overwrite" }),
     /Reload the TARGET session/,
   );
+  await assert.rejects(execute({ action: "report", id: externalPath, message: "update" }, legacy), /Reload the TARGET session/);
+  await assert.rejects(execute({ action: "report", id: externalPath, message: " " }, legacy), /report requires message/);
   const externalPane = panes.get("w-test:external")!;
   drafts.set(externalPane.pane_id, "unfinished user draft — leave this alone");
   await startReceiver(externalPath, externalPane);
@@ -375,6 +389,43 @@ try {
   assert.equal(mailboxDeliveries, countAfterAccepted, "retrying the same ID must not inject twice");
   await assert.rejects(execute({ action: "send", id: externalPath, message: "different", messageId: acceptedId }), /different message/);
 
+  // Informational reports are visible and retry-safe, but neither prompt nor complete a run.
+  const reportParams = { action: "report", id: externalPath, message: "focused checks pass" };
+  const usersBeforeReport = (await history.load(externalPath)).userEntryIds.size;
+  result = await execute(reportParams, legacy);
+  const reportId = result.details.messageId;
+  const reportEntryId = result.details.delivery.entryId;
+  assert.equal(result.details.messageAccepted, true);
+  assert.match(result.content[0].text, /No model turn requested/);
+  assert.equal(reportDeliveries, 1);
+  assert.equal(mailboxDeliveries, countAfterAccepted);
+  assert.equal(externalPane.agent_status, "idle");
+  const reported = await history.load(externalPath);
+  assert.equal(reported.userEntryIds.size, usersBeforeReport);
+  assert.equal(reported.messages.at(-1)?.role, "report");
+  assert.match(reported.messages.at(-1)!.text, new RegExp(`Report from Pi session ${legacy.getSessionId()}`));
+  assert.match(runState(reported, "idle").latest!.text, /safe discovered follow-up/);
+  result = await execute({ action: "read", id: externalPath, cursor: reportEntryId, limit: 1 });
+  assert.equal(result.structuredContent.messages[0].role, "report");
+  assert.match(result.content[0].text, /Report: \[pi_sessions:/);
+  assert.match(result.content[0].text, /focused checks pass/);
+  result = await execute({ action: "status", id: externalPath, messageId: reportId });
+  assert.equal(result.details.delivery.state, "accepted");
+  assert.equal(result.details.runId, undefined);
+  assert.equal(result.details.outcome, undefined);
+  result = await execute({ action: "watch", id: externalPath, messageId: reportId, timeoutSeconds: 1 });
+  assert.equal(result.details.messageAccepted, true);
+  assert.equal(result.details.outcome, undefined);
+  assert.match(result.content[0].text, /Report recorded/);
+  await startReceiver(externalPath, externalPane); // Recover report acceptance across receiver reloads.
+  result = await execute({ ...reportParams, messageId: reportId }, legacy);
+  assert.equal(result.details.delivery.state, "accepted");
+  assert.equal(reportDeliveries, 1, "retrying a recorded report must not append it again");
+  await assert.rejects(execute({ ...reportParams, message: "different", messageId: reportId }, legacy), /different message/);
+  await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), {
+    sessionId: external.getSessionId(), sessionPath: externalPath, paneId: externalPane.pane_id,
+  }, "safe discovered follow-up", acceptedId, undefined, "report"), /different message or delivery action/);
+
   externalPane.agent_status = "working";
   result = await execute({ action: "send", id: externalPath, message: "queued behind current run" });
   assert.equal(result.details.messageAccepted, false);
@@ -382,6 +433,10 @@ try {
   const queuedId = result.details.messageId;
   result = await execute({ action: "send", id: externalPath, message: "queued behind current run", messageId: queuedId });
   assert.equal(result.details.delivery.state, "queued", "a queued retry must not add a second request");
+  await execute({ action: "report", id: externalPath, message: "update while parent is busy" }, legacy);
+  assert.equal(reportDeliveries, 2, "reports must bypass idle gating and queued prompts");
+  assert.equal(mailboxDeliveries, countAfterAccepted);
+  assert.equal(externalPane.agent_status, "working", "report must not change the active run");
   assert.equal(await mailboxPending(join(agentDir, "pi-sessions-ipc"), {
     sessionId: external.getSessionId(), sessionPath: externalPath, paneId: externalPane.pane_id,
   }), true, "queued messages must prevent automatic task cleanup");
@@ -408,6 +463,9 @@ try {
   await execute({ action: "stop", id: external.getSessionId() });
   assert.ok(panes.has("w-test:sibling"), "stopping an external session must preserve unrelated panes");
   panes.delete("w-test:sibling");
+  const callsBeforeStoppedReport = herdrCalls.length;
+  await assert.rejects(execute({ action: "report", id: externalPath, message: "late update" }, legacy), /stopped; report does not launch/);
+  assert.equal(herdrCalls.slice(callsBeforeStoppedReport).some((args) => args[0] === "tab" && args[1] === "create" || args[0] === "pane" && args[1] === "run"), false);
   await assert.rejects(execute({ action: "focus", id: externalPath }), /use resume first/);
   result = await execute({ action: "watch", id: external.getSessionId(), timeoutSeconds: 1 });
   assert.match(result.content[0].text, /historical\/stopped/);
@@ -511,6 +569,7 @@ try {
   result = await execute({ action: "status", id: "self" });
   assert.match(result.content[0].text, /\(Self renamed\)/);
   await assert.rejects(execute({ action: "send", id: "self", message: "loop" }), /current Pi session/);
+  await assert.rejects(execute({ action: "report", id: "self", message: "loop" }, legacy), /current Pi session/);
   await eventHandlers.get("session_start")?.({}, { sessionManager: SessionManager.open(externalPath) });
 
   await execute({ action: "rename", id: created.id, name: "Renamed" });
@@ -579,6 +638,7 @@ try {
   result = await execute({ action: "status", id: created.sessionPath });
   assert.equal(result.details.status, "multiple", "two idle runtimes are still a duplicate-runtime conflict");
   await assert.rejects(execute({ action: "send", id: created.sessionPath, message: "unsafe duplicate target" }), /multiple Herdr panes/);
+  await assert.rejects(execute({ action: "report", id: created.sessionPath, message: "unsafe duplicate target" }, legacy), /multiple Herdr panes/);
   panes.delete("w-test:duplicate");
 
   // Task sessions can override thinking and automatically close their Herdr tab while preserving history.
@@ -628,12 +688,15 @@ try {
   // Exercise the real extension binding: direct Pi API, explicit no-template expansion,
   // no editor access, and a stale session context cannot receive another prompt.
   const bindingEvents = new Map<string, (...args: any[]) => unknown>();
+  let bindingBusy = false;
   const bindingContext = {
     mode: "tui", sessionManager: SessionManager.open(externalPath),
-    isIdle: () => true, hasPendingMessages: () => false,
+    isIdle: () => !bindingBusy, hasPendingMessages: () => bindingBusy,
     ui: { notify: () => {}, setEditorText: () => { throw new Error("draft touched"); } },
   };
   let apiDeliveries = 0;
+  let apiReports = 0;
+  const deferredReports: string[] = [];
   orchestrator({ ...fakePi,
     on: (name: string, handler: (...args: any[]) => unknown) => bindingEvents.set(name, handler),
     registerTool: () => {},
@@ -641,6 +704,14 @@ try {
       apiDeliveries++;
       assert.deepEqual(options, { deliverAs: "followUp", expandPromptTemplates: false });
       bindingContext.sessionManager.appendMessage({ role: "user", content, timestamp: Date.now() });
+    },
+    sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => {
+      apiReports++;
+      assert.equal(message.customType, REPORT_TYPE);
+      assert.equal(message.display, true);
+      assert.deepEqual(options, { triggerTurn: false });
+      if (bindingBusy) deferredReports.push(message.content);
+      else bindingContext.sessionManager.appendCustomMessageEntry(REPORT_TYPE, message.content, true);
     },
   });
   const previousPaneId = process.env.HERDR_PANE_ID;
@@ -651,9 +722,43 @@ try {
     const delivered = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "/literal-not-a-command");
     assert.equal(delivered.state, "accepted");
     assert.equal(apiDeliveries, 1);
+    const idleReport = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "/literal-report", undefined, undefined, "report");
+    assert.equal(idleReport.state, "accepted");
+    assert.equal(apiDeliveries, 1, "reports must never use sendUserMessage");
+    assert.equal(apiReports, 1);
+    bindingBusy = true;
+    const busyReport = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "busy report", undefined, undefined, "report");
+    assert.equal(busyReport.state, "queued", "accepted means persisted, not just submitted to Pi");
+    const busyRetry = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "busy report", busyReport.messageId, undefined, "report");
+    assert.equal(busyRetry.state, "queued");
+    assert.equal(apiReports, 2, "a deferred report must not be submitted twice");
+    await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "second busy report", undefined, undefined, "report");
+    assert.equal(apiReports, 3, "a pending report must not prevent another report being submitted");
+    // Simulate Pi flushing non-triggering custom messages after the current tool batch.
+    for (const content of deferredReports.splice(0)) bindingContext.sessionManager.appendCustomMessageEntry(REPORT_TYPE, content, true);
+    await bindingEvents.get("message_end")!({ message: { role: "custom", customType: REPORT_TYPE } });
+    const recordedReport = await mailboxStatus(join(agentDir, "pi-sessions-ipc"), identity, busyReport.messageId);
+    assert.equal(recordedReport.state, "accepted");
+    assert.equal(apiDeliveries, 1);
+    assert.equal(bindingBusy, true, "report recording does not wait for idle or restart the run");
+    await bindingEvents.get("session_start")!({}, bindingContext);
+    await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), identity,
+      "busy report", busyReport.messageId), /different message or delivery action/);
+    const recoveredReport = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity,
+      "busy report", busyReport.messageId, undefined, "report");
+    assert.equal(recoveredReport.state, "accepted");
+    assert.equal(apiReports, 3, "recorded report receipts survive reload");
+    const staleReport = await sendMailbox(join(agentDir, "pi-sessions-ipc"), identity,
+      "unrecorded report", undefined, undefined, "report");
+    await bindingEvents.get("session_start")!({}, bindingContext);
+    await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), identity,
+      "unrecorded report", staleReport.messageId, undefined, "report"), /receiver restarted or changed/);
+    assert.equal(apiReports, 4, "an unconfirmed report must not replay after reload");
     bindingContext.sessionManager = SessionManager.open(legacyPath);
     await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "wrong session"), /Mailbox target changed/);
     assert.equal(apiDeliveries, 1);
+    await assert.rejects(sendMailbox(join(agentDir, "pi-sessions-ipc"), identity, "wrong session", undefined, undefined, "report"), /Mailbox target changed/);
+    assert.equal(apiReports, 4);
   } finally {
     await bindingEvents.get("session_shutdown")!({});
     if (previousPaneId === undefined) delete process.env.HERDR_PANE_ID;

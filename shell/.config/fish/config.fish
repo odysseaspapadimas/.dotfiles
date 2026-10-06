@@ -51,3 +51,6 @@ if status is-interactive
     alias r='rails'
     alias t='tmux attach; or tmux new -s Work'
 end
+
+# Pi
+fish_add_path "/home/odysseas/.pi/agent/bin"

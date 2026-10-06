@@ -16,7 +16,7 @@ export interface DeliveryReceipt {
   error?: string;
 }
 interface Request extends MailboxIdentity {
-  action: "hello" | "send" | "status" | "pending";
+  action: "hello" | "send" | "report" | "status" | "pending";
   messageId?: string;
   message?: string;
 }
@@ -27,6 +27,7 @@ interface Response {
   error?: string;
 }
 interface Record {
+  action: "send" | "report";
   message: string;
   receipt: DeliveryReceipt;
   dispatchedAt?: number;
@@ -35,8 +36,8 @@ interface Receiver {
   isCurrent(): boolean;
   isIdle(): boolean;
   hasPendingMessages(): boolean;
-  deliver(content: string): void;
-  findAccepted(messageId: string): { entryId: string; content: string } | undefined;
+  deliver(content: string, action: "send" | "report"): void;
+  findAccepted(messageId: string): { entryId: string; content: string; action: "send" | "report" } | undefined;
   onError(error: unknown): void;
 }
 const MAX_FRAME = 256 * 1024;
@@ -108,7 +109,7 @@ export class SessionMailbox {
     this.records.clear();
   }
 
-  /** Called after user-message persistence and agent_settled; also polls only while queued. */
+  /** Called after message persistence and agent_settled; also polls only while queued. */
   wake(): void {
     if (this.closed || this.timer) return;
     this.timer = setTimeout(() => {
@@ -136,17 +137,21 @@ export class SessionMailbox {
       this.refresh();
       const outstanding = [...this.records.values()].some((record) =>
         record.receipt.state === "unknown" || record.receipt.state === "queued" && record.dispatchedAt !== undefined);
-      if (!outstanding && this.receiver.isIdle() && !this.receiver.hasPendingMessages()) {
-        const next = [...this.records.values()].find((record) => record.receipt.state === "queued");
-        if (next) {
-          // Claim before invoking Pi: a lost acknowledgment must never cause another injection.
-          next.dispatchedAt = Date.now();
-          try { this.receiver.deliver(messageMarker(next.receipt.messageId) + next.message); }
-          catch (error) {
-            next.receipt = { messageId: next.receipt.messageId, state: "unknown", error: String(error) };
-          }
-          this.refresh();
+      // Reports never trigger work, so submit them even while busy or behind a queued prompt.
+      // Pi itself defers custom-message insertion until the current tool batch is recorded.
+      const next = [...this.records.values()].find((record) => record.action === "report" &&
+        record.receipt.state === "queued" && record.dispatchedAt === undefined) ??
+        (!outstanding && this.receiver.isIdle() && !this.receiver.hasPendingMessages()
+          ? [...this.records.values()].find((record) => record.receipt.state === "queued" && record.dispatchedAt === undefined)
+          : undefined);
+      if (next) {
+        // Claim before invoking Pi: a lost acknowledgment must never cause another injection.
+        next.dispatchedAt = Date.now();
+        try { this.receiver.deliver(messageMarker(next.receipt.messageId) + next.message, next.action); }
+        catch (error) {
+          next.receipt = { messageId: next.receipt.messageId, state: "unknown", error: String(error) };
         }
+        this.refresh();
       }
     } catch (error) { this.receiver.onError(error); }
     finally {
@@ -170,15 +175,15 @@ export class SessionMailbox {
     }
     const id = request.messageId;
     if (!id || !ID.test(id)) return { error: "Invalid mailbox messageId" };
-    if (request.action !== "send" && request.action !== "status") return { error: "Unknown mailbox action" };
-    if (request.action === "send" && (typeof request.message !== "string" || !request.message.trim() || Buffer.byteLength(request.message) > 128 * 1024)) {
+    if (request.action !== "send" && request.action !== "report" && request.action !== "status") return { error: "Unknown mailbox action" };
+    if (request.action !== "status" && (typeof request.message !== "string" || !request.message.trim() || Buffer.byteLength(request.message) > 128 * 1024)) {
       return { error: "Mailbox message must contain 1–128KB of text" };
     }
     const accepted = this.receiver.findAccepted(id);
     const existing = this.records.get(id);
-    if (request.action === "send" && (existing && existing.message !== request.message ||
-      accepted && accepted.content !== messageMarker(id) + request.message)) {
-      return { error: "messageId was already used for a different message" };
+    if (request.action !== "status" && (existing && (existing.message !== request.message || existing.action !== request.action) ||
+      accepted && (accepted.content !== messageMarker(id) + request.message || accepted.action !== request.action))) {
+      return { error: "messageId was already used for a different message or delivery action" };
     }
     if (accepted) return { delivery: { messageId: id, state: "accepted", entryId: accepted.entryId } };
     if (existing) { this.pump(); return { delivery: { ...existing.receipt } }; }
@@ -191,12 +196,12 @@ export class SessionMailbox {
       if (record.receipt.state === "accepted") this.records.delete(key);
     }
     if (this.records.size >= 256) return { error: "Pi session mailbox is full; inspect pending messages first" };
-    const record: Record = { message: request.message!, receipt: { messageId: id, state: "queued" } };
+    const record: Record = { action: request.action, message: request.message!, receipt: { messageId: id, state: "queued" } };
     this.records.set(id, record);
     this.pump();
     if (record.dispatchedAt) {
-      // An idle receiver usually persists the user entry immediately. Otherwise report queued,
-      // not accepted: sendUserMessage is fire-and-forget and can fail asynchronously.
+      // An idle receiver usually persists immediately. Otherwise report queued, not accepted:
+      // Pi's message APIs are fire-and-forget and may defer persistence or fail asynchronously.
       await delay(50);
       if (!this.closed && this.receiver.isCurrent()) this.refresh();
     }
@@ -271,20 +276,20 @@ function receipt(response: Response, messageId: string): DeliveryReceipt {
   return delivery;
 }
 
-export async function sendMailbox(root: string, identity: MailboxIdentity, message: string, messageId?: string, signal?: AbortSignal): Promise<DeliveryReceipt> {
+export async function sendMailbox(root: string, identity: MailboxIdentity, message: string, messageId?: string, signal?: AbortSignal, action: "send" | "report" = "send"): Promise<DeliveryReceipt> {
   try {
     if (!messageId) {
       const hello = await request(root, identity, { action: "hello" }, signal);
       if (typeof hello.runtimeId !== "string" || !/^[0-9a-f-]{36}$/u.test(hello.runtimeId)) throw new Error("Invalid mailbox handshake");
       messageId = `${hello.runtimeId}:${randomUUID()}`;
     }
-    const response = await request(root, identity, { action: "send", message, messageId }, signal);
+    const response = await request(root, identity, { action, message, messageId }, signal);
     const delivery = receipt(response, messageId);
     if (["unknown", "rejected"].includes(delivery.state)) throw new Error(delivery.error ?? delivery.state);
     return delivery;
   } catch (error) {
     throw new Error(`PI_SESSIONS_MAILBOX ${JSON.stringify({ messageId, sessionId: identity.sessionId })}\n${String(error)}\n${messageId
-      ? "Delivery is unconfirmed. Check status with this messageId, or retry the SAME messageId and message; do not blindly resend with a new ID."
+      ? "Delivery is unconfirmed. Check status with this messageId, or retry the SAME action, messageId and message; do not blindly resend with a new ID."
       : "No message was submitted. Reload the TARGET session to enable its mailbox, then retry. Terminal input fallback is disabled."}`);
   }
 }

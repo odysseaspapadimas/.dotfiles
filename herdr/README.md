@@ -32,6 +32,14 @@ The wrapper:
 
 Use this wrapper for future local popup binaries. System commands that neither live in a user path nor call Herdr do not require it.
 
+## Dispatch workboard trial
+
+With Dispatch installed, **Ctrl+Space, then Shift+A** opens the plugin board
+overlay. **Ctrl+Space, then Shift+B** opens the same live board in a native
+90% × 90% popup through `popup-env`. Press `q` to close either surface; the daemon
+and feature owners keep running. **Ctrl+Space, then Shift+D** retains Herdr's
+built-in close-workspace action; Dispatch does not override it.
+
 ## Project scratch
 
 `prefix+p` opens the standalone `project-scratch` editor for the current Git root (or cwd outside Git). Notes are private state under `${XDG_STATE_HOME:-~/.local/state}/herdr/project-scratch/` and are available from any pane without Pi. Existing notes from Pi's former scratch extension are copied forward on first use. `F2` previews and promotes the selection or complete scratch to `.agents/project-journal.md`; `F8` clears after confirmation.
