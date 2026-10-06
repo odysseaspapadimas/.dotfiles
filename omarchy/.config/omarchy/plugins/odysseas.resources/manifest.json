@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "odysseas.resources",
+  "name": "System resources",
+  "version": "1.0.0",
+  "description": "Compact CPU and memory usage with per-core and memory details.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "System resources",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

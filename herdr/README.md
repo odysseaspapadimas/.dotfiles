@@ -39,6 +39,8 @@ overlay. **Ctrl+Space, then Shift+B** opens the same live board in a native
 90% × 90% popup through `popup-env`. Press `q` to close either surface; the daemon
 and feature owners keep running. **Ctrl+Space, then Shift+D** retains Herdr's
 built-in close-workspace action; Dispatch does not override it.
+Install Dispatch on each machine before using these shortcuts. The popup uses
+`popup-env` to restore the local launcher environment.
 
 ## Project scratch
 

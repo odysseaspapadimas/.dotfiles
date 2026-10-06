@@ -52,6 +52,9 @@
       ],
       "right": [
         {
+          "id": "odysseas.resources"
+        },
+        {
           "id": "omarchy.system-update"
         },
         {
