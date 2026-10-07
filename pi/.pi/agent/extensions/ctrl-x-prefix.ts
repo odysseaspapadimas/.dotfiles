@@ -1,5 +1,6 @@
 import {
   CustomEditor,
+  copyToClipboard,
   type AppKeybinding,
   type ExtensionAPI,
   type KeybindingsManager,
@@ -16,11 +17,18 @@ import {
 const LEADER_KEY = "ctrl+x";
 const CHORD_TIMEOUT_MS = 2_000;
 
+type ComposerAction = "edit" | "undo" | "copy" | "cut";
+
 type LeaderCommand =
+  | { label: string; composerAction: ComposerAction }
   | { label: string; action: AppKeybinding }
   | { label: string; command: string; preserveDraft?: boolean; useDraftAsArgs?: boolean };
 
 const LEADER_COMMANDS: Record<string, LeaderCommand> = {
+  e: { label: "edit last message", composerAction: "edit" },
+  backspace: { label: "undo last exchange", composerAction: "undo" },
+  y: { label: "copy composer", composerAction: "copy" },
+  x: { label: "cut composer", composerAction: "cut" },
   c: { label: "copy", action: "app.message.copy" },
   m: { label: "model", action: "app.model.select" },
   s: { label: "settings", command: "/settings", preserveDraft: true },
@@ -58,6 +66,7 @@ function buildHelpLines(theme: Theme, width: number): string[] {
   const item = (shortcut: string, name: string) => `${key(shortcut)} ${label(name)}`;
   const rows = [
     `${theme.fg("muted", "Session ")} ${item("n", "new")}  ${item("l/u", "resume")}  ${item("t", "tree")}`,
+    `${theme.fg("muted", "Composer")} ${item("e", "edit last")}  ${item("Backspace", "undo")}  ${item("y", "copy")}  ${item("x", "cut")}`,
     `${theme.fg("muted", "Pi      ")} ${item("m", "model")}  ${item("s", "settings")}  ${item("r", "reload")}`,
     `${theme.fg("muted", "Project ")} ${item("d", "diff")}  ${item("f", "view")}  ${item("z", "restore")}`,
     `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("c", "copy")}  ${item("h", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
@@ -85,6 +94,51 @@ function isPrintableInput(data: string): boolean {
 
 export default function ctrlXPrefix(pi: ExtensionAPI) {
   let activeEditor: { dispose(): void } | undefined;
+  let pendingDraft: string | undefined;
+
+  for (const action of ["edit", "undo"] as const) {
+    pi.registerCommand(`composer-${action}`, {
+      description: action === "edit" ? "Edit the last user message" : "Undo the last exchange (conversation only)",
+      handler: async (_args, ctx) => {
+        const draft = pendingDraft ?? ctx.ui.getEditorText();
+        pendingDraft = undefined;
+        if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+          ctx.ui.setEditorText(draft);
+          ctx.ui.notify("Wait for Pi to finish before rewinding", "warning");
+          return;
+        }
+        const entry = [...ctx.sessionManager.getBranch()].reverse().find(
+          (entry) => entry.type === "message" && entry.message.role === "user",
+        );
+        if (!entry || entry.type !== "message" || entry.message.role !== "user") {
+          ctx.ui.setEditorText(draft);
+          ctx.ui.notify("No user message to rewind", "info");
+          return;
+        }
+        if (draft.length > 0 && await ctx.ui.select(
+          action === "edit" ? "Replace current draft with your last message?" : "Clear current draft and undo last exchange?",
+          ["Replace", "Cancel"],
+        ) !== "Replace") {
+          ctx.ui.setEditorText(draft);
+          return;
+        }
+        if (Array.isArray(entry.message.content) && entry.message.content.some((part) => part.type === "image")) {
+          ctx.ui.setEditorText(draft);
+          ctx.ui.notify("This message has images; use /tree to avoid losing attachments", "warning");
+          return;
+        }
+        try {
+          const result = await ctx.navigateTree(entry.id, { summarize: false });
+          if (result.cancelled) ctx.ui.setEditorText(draft);
+          else ctx.ui.setEditorText(action === "undo" ? "" : typeof entry.message.content === "string"
+            ? entry.message.content : entry.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
+        } catch (error) {
+          ctx.ui.setEditorText(draft);
+          ctx.ui.notify(String(error), "error");
+        }
+      },
+    });
+  }
 
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
@@ -174,8 +228,27 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
         this.tui.requestRender();
       }
 
-      private runLeaderCommand(command: LeaderCommand): void {
+      private async runLeaderCommand(command: LeaderCommand): Promise<void> {
         this.setChordWaiting(false);
+
+        if ("composerAction" in command) {
+          const draft = this.getText();
+          if (command.composerAction === "copy" || command.composerAction === "cut") {
+            if (!draft) return;
+            try {
+              await copyToClipboard(draft);
+              // Do not erase text typed while the clipboard write was in flight.
+              if (command.composerAction === "cut" && this.getText() === draft) this.setText("");
+              ctx.ui.notify(command.composerAction === "cut" ? "Composer cut" : "Composer copied", "info");
+            } catch (error) {
+              ctx.ui.notify(`Clipboard failed: ${error}`, "error");
+            }
+          } else {
+            pendingDraft = draft;
+            this.onSubmit?.(`/composer-${command.composerAction}`);
+          }
+          return;
+        }
 
         if ("action" in command) {
           const handler = this.actionHandlers.get(command.action);
@@ -231,7 +304,7 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
 
           const command = getChord(data);
           if (command) {
-            this.runLeaderCommand(command);
+            void this.runLeaderCommand(command);
             return;
           }
 
