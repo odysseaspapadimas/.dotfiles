@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 exec herdr \
-  --remote ubuntu \
+  --remote "${HERDR_DEV_HOST:-debina}" \
   --remote-keybindings server \
-  --session work \
+  --session "${HERDR_DEV_SESSION:-default}" \
   "$@"

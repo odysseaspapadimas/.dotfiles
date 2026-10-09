@@ -1,0 +1,2 @@
+# Shared template only; preserve each machine's Pi identity, packages and state.
+^/\.pi/agent/settings\.json$

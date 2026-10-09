@@ -32,7 +32,9 @@ test("Ctrl+X chords work with Pi 1.0's CustomEditor and preserve drafts", async 
       help.handleInput("\x1b");
     },
   } };
-  ctrlX({ on: (name: string, handler: any) => handlers.set(name, handler) } as unknown as ExtensionAPI);
+  ctrlX({ on: (name: string, handler: any) => handlers.set(name, handler),
+    registerCommand() {},
+  } as unknown as ExtensionAPI);
   handlers.get("session_start")({}, ctx);
   editor.actionHandlers.set("app.message.copy", () => copied++);
   editor.onSubmit = async (command: string) => { submitted.push(command); editor.setText(""); };
@@ -44,6 +46,12 @@ test("Ctrl+X chords work with Pi 1.0's CustomEditor and preserve drafts", async 
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(submitted, ["/settings"]);
     assert.equal(editor.getText(), "Keep this draft");
+    for (const [key, command] of [["a", "/subagents"], ["h", "/subagents-toggle"], ["H", "/share"]]) {
+      editor.handleInput("\x18"); editor.handleInput(key);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(submitted.at(-1), command);
+      assert.equal(editor.getText(), "Keep this draft", `${key} must preserve the draft`);
+    }
     editor.handleInput("\x18"); editor.handleInput("?");
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(helpClosed, true);

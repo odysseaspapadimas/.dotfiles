@@ -2,13 +2,12 @@
  * OpenAI Codex Quota Extension for Pi
  *
  * Shows the currently reported ChatGPT/Codex usage windows for the
- * `openai-codex` provider in Pi's footer.
+ * `openai` provider in Pi's footer.
  * Uses the same private endpoint the Codex web UI/tools use:
  *   https://chatgpt.com/backend-api/wham/usage
  *
- * Auth is read from ~/.pi/agent/auth.json under `openai-codex` (preferred),
- * or from ~/.codex/auth.json as a fallback. No extra setup is needed if Pi or
- * Codex CLI is already logged in.
+ * Auth is read from ~/.codex/auth.json. Run `codex login` with the same
+ * ChatGPT account used by Pi's native OpenAI integration.
  *
  * Commands:
  *   /codex-quota          Show detailed quota and a flexible weekly pacing table
@@ -84,34 +83,15 @@ function readJson(path: string): Record<string, unknown> | null {
 function tokenFromEntry(entry: unknown): { accessToken: string; accountId?: string } | null {
 	if (!entry || typeof entry !== "object") return null;
 	const obj = entry as Record<string, unknown>;
-	const accessToken =
-		typeof obj.access === "string" ? obj.access.trim()
-		: typeof obj.access_token === "string" ? obj.access_token.trim()
-		: "";
+	const accessToken = typeof obj.access_token === "string" ? obj.access_token.trim() : "";
 	if (!accessToken) return null;
-	const accountId =
-		typeof obj.accountId === "string" ? obj.accountId.trim()
-		: typeof obj.account_id === "string" ? obj.account_id.trim()
-		: undefined;
+	const accountId = typeof obj.account_id === "string" ? obj.account_id.trim() : undefined;
 	return { accessToken, accountId };
 }
 
 function readCodexConfig(): CodexAuthConfig | null {
-	const envToken = process.env.OPENAI_CODEX_ACCESS_TOKEN?.trim();
-	if (envToken) {
-		return {
-			accessToken: envToken,
-			accountId: process.env.OPENAI_CODEX_ACCOUNT_ID?.trim() || undefined,
-			source: "env",
-		};
-	}
-
-	const piAuth = readJson(join(getAgentDir(), "auth.json"));
-	const piCodex = tokenFromEntry(piAuth?.["openai-codex"]);
-	if (piCodex) return { ...piCodex, source: "pi auth.json" };
-
 	const cliAuth = readJson(join(homedir(), ".codex", "auth.json"));
-	const cliCodex = tokenFromEntry(cliAuth);
+	const cliCodex = tokenFromEntry(cliAuth?.tokens);
 	if (cliCodex) return { ...cliCodex, source: "~/.codex/auth.json" };
 
 	return null;
@@ -374,7 +354,7 @@ export function detailText(result: CodexUsageResult, now = new Date()): string {
 }
 
 function isOpenAICodexModel(model: { provider: string; id: string } | undefined): boolean {
-	return model?.provider === "openai-codex";
+	return model?.provider === "openai";
 }
 
 export default function (pi: ExtensionAPI) {

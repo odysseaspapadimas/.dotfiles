@@ -16,6 +16,7 @@ import { SessionStore, METADATA_TYPE, SETTLED_TYPE, REPORT_TYPE, metadataFor, ca
   type SessionSnapshot, type SettledRun, textContent } from "./pi-sessions/store.ts";
 import { recall, conversationPage, excerpt } from "./pi-sessions/recall.ts";
 import { runState, waitWithSignal } from "./pi-sessions/runs.ts";
+import { registerSubagentUI, workerRow } from "./pi-sessions/ui.ts";
 import { Action, SessionOutput, type ActionName, type SessionResultDetails } from "./pi-sessions/output.ts";
 import { SessionMailbox, sendMailbox, mailboxStatus, mailboxPending, messageMarker,
   type MailboxIdentity, type DeliveryReceipt } from "./pi-sessions/mailbox.ts";
@@ -214,13 +215,62 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
   const store = new SessionStore(SESSION_ROOT);
   let shutdown = new AbortController();
   let mailbox: SessionMailbox | undefined;
+  let childCatalogue: { parentId: string; at: number; sessions: ManagedSession[] } | undefined;
+  const subagentUI = registerSubagentUI(pi, {
+    parentId: async (ctx) => SIDE_SOURCE_SESSION
+      ? (await store.load(SIDE_SOURCE_SESSION)).session.sessionId : ctx.sessionManager.getHeader()?.id,
+    rows: async (parentId, signal) => {
+      if (!childCatalogue || childCatalogue.parentId !== parentId || Date.now() - childCatalogue.at >= 15_000) {
+        const sessions = (await discoverSessions(signal)).filter((session) => session.parentSessionId === parentId);
+        childCatalogue = { parentId, at: Date.now(), sessions };
+      }
+      if (!childCatalogue.sessions.length) return [];
+      const index = await discoverRuntimes(signal);
+      const children = await Promise.all(childCatalogue.sessions.map(async (session) => ({
+        session, runtimes: await runtimesFor(session, signal, index),
+      })));
+      // Always include live children, plus the 20 most recently updated saved sessions.
+      const recent = children.filter((child) => !child.runtimes.length)
+        .sort((a, b) => b.session.updatedAt - a.session.updatedAt).slice(0, 20);
+      const selected = [...children.filter((child) => child.runtimes.length), ...recent];
+      const results = await Promise.allSettled(selected.map(async ({ session }) => {
+        const snapshot = await store.load(session.sessionPath, signal);
+        if (snapshot.session.parentSessionId !== parentId) return undefined;
+        const live = await runtimesFor(snapshot.session, signal, index);
+        const status = runtimeStatus(live);
+        return workerRow(snapshot, status, observedRun(snapshot, status).outcome);
+      }));
+      signal.throwIfAborted();
+      for (const result of results) {
+        if (result.status === "rejected" && (result.reason as NodeJS.ErrnoException)?.code !== "ENOENT") throw result.reason;
+      }
+      return results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+    },
+    open: async (parentId, path, reopen, signal) => withFileMutationQueue(path, async () => {
+      const session = (await store.load(path, signal)).session;
+      if (session.parentSessionId !== parentId) throw new Error("This session no longer belongs to this parent's subagents");
+      assertNotSelf(session, "open");
+      let runtime = await oneRuntime(session, signal);
+      if (!runtime && reopen) {
+        if (!await hasAcceptedStartingMessage(session)) throw missingStartingMessageError(session);
+        // Deliberately no prompt and no task monitor: inspecting an old result must not restart work or close it again.
+        runtime = (await launchSession(session, signal)).runtime;
+      }
+      if (!runtime) throw new Error("This worker is stopped. Press r to reopen its saved session without prompting.");
+      if (!runtime.tab_id) throw new Error("Session has no Herdr tab");
+      await herdr(["tab", "focus", runtime.tab_id], signal);
+    }),
+  });
 
   pi.on("session_start", async (_event, ctx) => {
+    subagentUI.stop();
+    childCatalogue = undefined;
     await mailbox?.close();
     mailbox = undefined;
     const sourceFile = ctx.sessionManager.getSessionFile();
     currentSessionPath = sourceFile ? await canonicalPath(sourceFile) : undefined;
     if (shutdown.signal.aborted) shutdown = new AbortController();
+    await subagentUI.start(ctx);
     const paneId = process.env.HERDR_PANE_ID;
     const header = ctx.sessionManager.getHeader();
     if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !paneId || !currentSessionPath || !sourceFile || !header) return;
@@ -265,6 +315,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     if (event.message.role === "user" || event.message.role === "custom" && event.message.customType === REPORT_TYPE) mailbox?.wake();
   });
   pi.on("session_shutdown", async () => {
+    subagentUI.stop();
+    childCatalogue = undefined;
     shutdown.abort();
     await mailbox?.close();
     mailbox = undefined;
@@ -954,6 +1006,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       return text;
     },
     async execute(_toolCallId, params: ToolParams, signal, onUpdate, ctx) {
+      childCatalogue = undefined; // Tool-driven creates/renames appear on the next UI refresh.
       signal?.throwIfAborted();
       const toolResult = (text: string, details: SessionResultDetails = {}) => sessionToolResult(params.action, text, details);
       const limit = Math.max(1, Math.min(100, params.limit ?? 20));

@@ -82,6 +82,43 @@ All tool text is capped at 32KB/1,000 lines; read pages are also bounded before
 rendering. Status and watch use short assistant previews with paths/entry IDs
 for full reads. `read`/`recall` need no Herdr connection unless resolving a pane ID.
 
+## Subagent widget and picker
+
+Interactive sessions show their direct children in a todo-style tree **above the
+editor**. The widget shows running/idle workers and failed, aborted, blocked,
+duplicate-runtime or unknown states that need attention. Completed workers leave
+the widget once their runtimes close; normally stopped workers also leave it.
+Reopening saved history brings the live session back as **idle**, even though its
+previous task result is still completed. Pi transcripts are never deleted.
+
+Run `/subagents` or press **Ctrl+X, A** to open the compact picker.
+**Ctrl+X, H** (or `/subagents-toggle`) hides/shows the tree above the editor.
+Hiding only affects that foreground UI binding: workers keep running, status
+keeps refreshing, and the picker still works. Reloading or switching sessions
+starts visible again. Both chords preserve the current draft. Share moves to
+**Ctrl+X, Shift+H**; `Ctrl+X, ?` lists the shortcuts.
+
+Picker controls:
+
+- `j`/`k` or arrows: select a child.
+- Enter: inspect its latest assistant result; `j`/`k` scroll long results.
+- `f`: focus an existing runtime (never launches a stopped child).
+- `r`: reopen if stopped, then focus, **without adding a prompt or restarting
+  work**. This does not start a cleanup monitor that would immediately close an
+  already-completed task.
+- Escape: back from a result, or close the picker.
+
+The picker includes all live children plus the 20 most recently updated saved
+children, ordered with active/needs-attention workers first. The widget displays
+up to six rows and an overflow count. Status refreshes every three seconds; the
+child catalogue refreshes every 15 seconds and is invalidated by tool actions.
+Side chats use the source session's children. Headless sessions mount no UI.
+Polling is cancelled on session replacement/shutdown, and uncertain runtime
+status preserves the previous rows with a warning rather than claiming success.
+Focus/reopen rechecks ownership and rejects duplicate runtimes. Existing task
+completion and cleanup rules remain authoritative; viewing a result never
+starts another model turn.
+
 ## Session actions
 
 - `create`: requires a name and self-contained starting message. New sessions
@@ -217,6 +254,8 @@ Cleanup failures are reported, never described as successful closure.
   metadata. Existing legacy registry migration is retained.
 - `pi-sessions/recall.ts`: ranking, dated excerpts and cursor-based reads.
 - `pi-sessions/runs.ts`: explicit run outcome rules and cancellable shared waits.
+- `pi-sessions/ui.ts`: parent-scoped widget/picker, j/k navigation, scrollable
+  saved results and session-bound refresh lifecycle.
 - `pi-sessions/mailbox.ts`: private, session/pane-bound IPC, queued delivery,
   acceptance receipts, retry deduplication, and receiver lifecycle cleanup.
 

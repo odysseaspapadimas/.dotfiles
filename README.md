@@ -1,6 +1,6 @@
 # Dotfiles
 
-Shared CLI and development configuration for Omarchy, Ubuntu, and macOS, managed with [GNU Stow](https://www.gnu.org/software/stow/).
+Shared CLI and development configuration for Omarchy, Debina, Ubuntu, and macOS, managed with [GNU Stow](https://www.gnu.org/software/stow/).
 
 ## Bootstrap
 
@@ -19,12 +19,21 @@ Rust build output is kept under `~/.cache/dotfiles-build`, not inside the reposi
 ```bash
 dot                # Pull, bootstrap tools, and restow
 dot --stow-only    # Restow without pulling or building
-herdr-w             # Attach to the remote Ubuntu work session
+dot --sync-only    # Git pull only; do not bootstrap, restow or enable services
+herdr-w             # Attach to Debina's default session
 ```
 
 Fish’s `~/.config/fish/fish_variables` is machine-local runtime state, not shared configuration. `dot` preserves existing values when converting old Stow symlinks to a real local file; Git and `dot`’s Stow invocation exclude that file. Shared path settings use session-global variables in `config.fish`, so starting or upgrading Fish does not dirty the repository. Other configuration changes still trigger `dot`’s normal commit-or-stash safeguard.
 
-`herdr-w` expects an SSH host named `ubuntu`. SSH keys and `~/.ssh/config` remain machine-local and are intentionally not tracked. The current setup uses Ubuntu's Tailscale address.
+`herdr-w` expects an SSH host named `debina` and attaches to its `default` session. Set `HERDR_DEV_HOST=ubuntu HERDR_DEV_SESSION=work` to use the Ubuntu fallback. SSH keys and `~/.ssh/config` remain machine-local and are intentionally not tracked.
+
+### Sharing across machines
+
+The Git remote is the source of shared dotfiles. Commit/push intentional changes, then run `dot --sync-only` on the other machines. It refuses dirty checkouts and pulls with `--ff-only`, without adopting files, rebuilding tools, changing login shells, restowing platform packages, or starting services. Do not Syncthing `.git` directories. Debina/Ubuntu should normally use this mode; full `dot` remains a desktop/fresh-machine bootstrap.
+
+`pi/.pi/agent/settings.json` is a portable initial template, not live machine state. `dot` converts an old settings symlink to a private local file without losing its contents; Stow excludes the template. Device IDs, changelog state, provider logins, machine-specific packages and MCP configuration remain local. To apply later preference changes, update the local Pi settings deliberately; Git pulls do not overwrite them. Credentials, installed dependencies and runtime state are never published.
+
+Omarchy's Portd service now defaults to Debina. Machine-local systemd overrides remain outside this repository, and pulling dotfiles does not restart the service.
 
 ## Packages
 

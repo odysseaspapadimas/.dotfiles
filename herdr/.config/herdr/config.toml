@@ -19,6 +19,7 @@ kitty_graphics = true
 
 [keys]
 prefix = "ctrl+space"
+last_pane = "prefix+backspace"
 previous_tab = "prefix+p"
 previous_agent = "prefix+["
 next_agent = "prefix+]"

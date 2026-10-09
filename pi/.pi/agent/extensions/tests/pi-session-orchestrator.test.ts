@@ -81,6 +81,7 @@ async function startReceiver(path: string, pane: Pane) {
   receivers.set(pane.pane_id, receiver);
 }
 let registered: any;
+const commands = new Map<string, any>();
 const eventHandlers = new Map<string, (...args: any[]) => unknown>();
 let nextRuntime = 1;
 let acceptNextInitialPrompt = true;
@@ -178,6 +179,7 @@ const fakePi: any = {
   registerTool(definition: any) {
     registered = definition;
   },
+  registerCommand(name: string, definition: any) { commands.set(name, definition); },
   getThinkingLevel() {
     return "medium";
   },
@@ -685,6 +687,61 @@ try {
   result = await execute({ action: "watch", id: task.sessionPath, timeoutSeconds: 1 });
   assert.equal(result.details.outcome, "completed");
   assert.equal(result.details.cleanedUp, false, "already-closed tasks must not claim another tab closure");
+  // Real picker source: only this parent's children; focus/reopen never submit another prompt.
+  const uiChild = (await execute({ action: "create", name: "UI child", message: "inspect me" }, external)).details.session;
+  const unrelated = (await execute({ action: "create", name: "Not this parent's child", message: "unrelated" }, legacy)).details.session;
+  const uiPane = [...panes.values()].find((pane) => pane.agent_session?.value === uiChild.sessionPath)!;
+  uiPane.agent_status = "working";
+  let widget: any;
+  let pickerAction = "inspect";
+  const uiNotices: string[] = [];
+  const uiTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const uiContext = { mode: "tui", hasUI: true, sessionManager: SessionManager.open(externalPath), ui: {
+    notify: (message: string) => uiNotices.push(message),
+    setWidget: (_key: string, content: any, options: any) => {
+      if (content) assert.equal(options.placement, "aboveEditor");
+      widget = content;
+    },
+    custom: (factory: any) => new Promise((resolve) => {
+      const component = factory({ terminal: { rows: 40 }, requestRender() {} }, uiTheme,
+        { matches: (data: string, action: string) => action === "tui.select.cancel" && data === "\x1b" }, resolve);
+      const screen = component.render(72).join("\n");
+      assert.match(screen, /UI child/);
+      assert.doesNotMatch(screen, /Not this parent's child/);
+      if (pickerAction === "inspect") {
+        component.handleInput("\r");
+        assert.match(component.render(72).join("\n"), /reply: inspect me/);
+        component.handleInput("\x1b"); component.handleInput("\x1b");
+      } else component.handleInput(pickerAction);
+    }),
+  } };
+  await eventHandlers.get("session_start")?.({}, uiContext);
+  assert.match(widget({}, uiTheme).render(100).join("\n"), /UI child \(running\)/);
+  await commands.get("subagents").handler("", uiContext);
+  uiPane.agent_status = "idle";
+  settle(uiChild.sessionPath);
+  await execute({ action: "stop", id: uiChild.sessionPath });
+  pickerAction = "f";
+  await commands.get("subagents").handler("", uiContext);
+  assert.match(uiNotices.at(-1)!, /stopped/);
+  assert.equal(widget, undefined, "completed child disappears from widget after runtime cleanup");
+  const promptsBefore = SessionManager.open(uiChild.sessionPath).getBranch().filter((entry) => entry.type === "message" && entry.message.role === "user").length;
+  pickerAction = "r";
+  await commands.get("subagents").handler("", uiContext);
+  assert.equal(SessionManager.open(uiChild.sessionPath).getBranch().filter((entry) => entry.type === "message" && entry.message.role === "user").length, promptsBefore);
+  const resumedUiPane = [...panes.values()].find((pane) => pane.agent_session?.value === uiChild.sessionPath)!;
+  assert.match((widget as any)({}, uiTheme).render(100).join("\n"), /UI child \(idle\)/,
+    "reopened completed sessions must reappear in the tree");
+  assert.ok(herdrCalls.some((args) => args[0] === "tab" && args[1] === "focus" && args[2] === resumedUiPane.tab_id));
+  panes.set("w-test:duplicate-ui", { ...resumedUiPane, pane_id: "w-test:duplicate-ui" });
+  pickerAction = "f";
+  await commands.get("subagents").handler("", uiContext);
+  assert.match(uiNotices.at(-1)!, /multiple Herdr panes/);
+  panes.delete("w-test:duplicate-ui");
+  await execute({ action: "stop", id: uiChild.sessionPath });
+  await execute({ action: "stop", id: unrelated.sessionPath });
+  await eventHandlers.get("session_shutdown")?.({});
+
   // Exercise the real extension binding: direct Pi API, explicit no-template expansion,
   // no editor access, and a stale session context cannot receive another prompt.
   const bindingEvents = new Map<string, (...args: any[]) => unknown>();

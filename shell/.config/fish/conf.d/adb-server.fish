@@ -1,7 +1,9 @@
-# portd exposes the Mac ADB server on Ubuntu's standard ADB port.
-# The Mac keeps its own ADB daemon on 5039 to avoid the portd SSH endpoint.
-if test (hostname) = Odysseas-Ubuntu
-    set -gx ADB_SERVER_SOCKET tcp:127.0.0.1:5037
-else
-    set -gx ADB_SERVER_SOCKET tcp:127.0.0.1:5039
+# Preserve machine-local overrides. Omarchy owns the ADB server on5039;
+# development hosts use its portd reverse forward on5037.
+if not set -q ADB_SERVER_SOCKET
+    if test (hostname) = Omarchy-Mac
+        set -gx ADB_SERVER_SOCKET tcp:127.0.0.1:5039
+    else
+        set -gx ADB_SERVER_SOCKET tcp:127.0.0.1:5037
+    end
 end

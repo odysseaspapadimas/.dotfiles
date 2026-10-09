@@ -1,6 +1,5 @@
 {
-  "lastChangelogVersion": "1.0.4",
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "openai",
   "defaultModel": "gpt-6.1-sol",
   "defaultThinkingLevel": "xhigh",
   "defaultTools": [
@@ -32,6 +31,5 @@
   "fullscreenScrollbar": "auto",
   "showCacheMissNotices": true,
   "fullscreenCopyOnSelect": true,
-  "cacheWarming": "idle",
-  "deviceId": "f7c1e44d-cf24-4e07-86e0-a2e9b01a7ea4"
+  "cacheWarming": "idle"
 }

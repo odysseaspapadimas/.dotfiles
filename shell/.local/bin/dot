@@ -4,16 +4,40 @@ set -euo pipefail
 repo="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 packages=(pi herdr hunk portd nvim ghostty kitty omarchy shell luca)
 stow_only=false
+sync_only=false
 
-if [[ ${1:-} == "--stow-only" ]]; then
-  stow_only=true
-  shift
-fi
+case ${1:-} in
+  --stow-only) stow_only=true; shift ;;
+  --sync-only) sync_only=true; shift ;;
+esac
 
 if (($#)); then
-  echo "usage: dot [--stow-only]" >&2
+  echo "usage: dot [--stow-only | --sync-only]" >&2
   exit 2
 fi
+
+localize_pi_settings() {
+  local directory="$HOME/.pi/agent"
+  local managed="$repo/pi/.pi/agent"
+  local settings="$directory/settings.json"
+  local temporary
+  if [[ -L $directory && $(readlink -f "$directory") == "$managed" ]]; then
+    temporary="$(mktemp -d "$HOME/.pi/.agent-local.XXXXXX")"
+    cp -a "$directory/." "$temporary/"
+    rm -- "$directory"
+    mv -- "$temporary" "$directory"
+  fi
+  mkdir -p "$directory"
+  if [[ -L $settings && $(readlink -f "$settings") == "$managed/settings.json" ]]; then
+    temporary="$(mktemp "$directory/.settings-local.XXXXXX")"
+    cp -pL "$settings" "$temporary"
+    chmod 600 "$temporary"
+    mv -f -- "$temporary" "$settings"
+  elif [[ ! -e $settings && ! -L $settings ]]; then
+    cp "$managed/settings.json" "$settings"
+    chmod 600 "$settings"
+  fi
+}
 
 localize_fish_state() {
   local config_dir="$HOME/.config/fish"
@@ -216,6 +240,19 @@ ensure_fish_login_shell() {
 }
 
 localize_fish_state
+localize_pi_settings
+
+# Development hosts must be able to update shared configuration without adopting
+# live files, installing tools, or enabling desktop forwarding services.
+if [[ $sync_only == true ]]; then
+  if [[ -n $(git -C "$repo" status --porcelain) ]]; then
+    echo "dot: $repo has uncommitted changes; commit or stash them first" >&2
+    exit 1
+  fi
+  git -C "$repo" pull --ff-only
+  echo "dot: shared Git files synchronized; machine-local settings/services unchanged"
+  exit 0
+fi
 
 if [[ $stow_only == false ]]; then
   if [[ -n $(git -C "$repo" status --porcelain) ]]; then

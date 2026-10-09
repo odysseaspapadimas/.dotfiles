@@ -2,7 +2,7 @@
  * Auto Session Setup Extension
  *
  * On the first user message:
- * 1. Uses deepseek-v4.1-flash to generate a concise session name
+ * 1. Uses openai/gpt-6-luna to generate a concise session name
  * 2. Sets the Pi session name
  * 3. Updates the terminal title and current Herdr tab label
  */
@@ -53,14 +53,9 @@ export default function (pi: ExtensionAPI) {
 			.some((entry) => entry.type === "message" && entry.message.role === "user");
 		isFirstMessage = !hasExistingName && !hasUserMessages;
 
-		// Use the latest DeepSeek Flash model only; a missing model should be visible
-		// rather than silently selecting an unrelated DeepSeek variant.
-		targetModel = ctx.modelRegistry.find("opencode-go", "deepseek-v4.1-flash");
-		if (!targetModel) {
-			targetModel = ctx.modelRegistry
-				.getAll()
-				.find((m) => m.id === "deepseek-v4.1-flash");
-		}
+		// Use GPT Luna through OpenAI only; keep the prompt fallback if
+		// unavailable rather than silently switching models or providers.
+		targetModel = ctx.modelRegistry.find("openai", "gpt-6-luna");
 	});
 
 	// ── On first user message, generate session name asynchronously ──────
@@ -100,12 +95,10 @@ export default function (pi: ExtensionAPI) {
 							},
 						],
 					},
-					// Console Go requires this routing header for nested model calls.
 					{
 						signal: namingAbort.signal,
 						maxTokens: 2_048,
 						reasoning: "low",
-						headers: { "x-opencode-session": ctx.sessionManager.getSessionId() },
 					},
 				)
 				.then((result) => {
@@ -134,7 +127,7 @@ export default function (pi: ExtensionAPI) {
 				.catch((error) => {
 					if (requestGeneration !== generation) return;
 					ctx.ui.notify(
-						`Session naming with deepseek-v4.1-flash failed; keeping the prompt fallback: ${error instanceof Error ? error.message : String(error)}`,
+						`Session naming with openai/gpt-6-luna failed; keeping the prompt fallback: ${error instanceof Error ? error.message : String(error)}`,
 						"warning",
 					);
 				})
@@ -142,7 +135,7 @@ export default function (pi: ExtensionAPI) {
 					if (requestGeneration === generation) namingAbort = undefined;
 				});
 		} else {
-			ctx.ui.notify("deepseek-v4.1-flash is unavailable; keeping the prompt fallback name", "warning");
+			ctx.ui.notify("openai/gpt-6-luna is unavailable; keeping the prompt fallback name", "warning");
 		}
 	});
 
