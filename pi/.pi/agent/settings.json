@@ -2,6 +2,19 @@
   "defaultProvider": "openai",
   "defaultModel": "gpt-6.1-sol",
   "defaultThinkingLevel": "xhigh",
+  "compaction": {
+    "enabled": true,
+    "modelOverrides": {
+      "openai/gpt-6.1-sol": {
+        "reserveTokens": 50000,
+        "keepRecentTokens": 20000
+      },
+      "openai-codex/gpt-6.1-sol": {
+        "reserveTokens": 50000,
+        "keepRecentTokens": 20000
+      }
+    }
+  },
   "defaultTools": [
     "+codemode"
   ],
@@ -12,8 +25,7 @@
     "npm:@juicesharp/rpiv-ask-user-question",
     "npm:pi-web-access",
     "npm:pi-context-usage",
-    "npm:@juicesharp/rpiv-todo",
-    "npm:@ogulcancelik/pi-codex-compaction"
+    "npm:@juicesharp/rpiv-todo"
   ],
   "extensions": [
     "-extensions/herdr-agent-state.ts"

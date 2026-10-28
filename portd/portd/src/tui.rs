@@ -307,9 +307,9 @@ impl App {
         self.table.select(None);
         self.restore_selection(None);
         self.message = if self.reverse_mode {
-            "Mac services exposed on Ubuntu".to_string()
+            "Client services exposed on remote host".to_string()
         } else {
-            "Ubuntu services available on Mac".to_string()
+            "Remote services available on client".to_string()
         };
     }
 
@@ -329,7 +329,7 @@ impl App {
 
     async fn open(&mut self) {
         if self.reverse_mode {
-            self.message = "open is only available for Mac-facing forwards".to_string();
+            self.message = "open is only available for client-facing forwards".to_string();
         } else if let Some(port) = self.selected_port() {
             self.post(&format!("/api/tunnels/{port}/open")).await;
         }
@@ -387,7 +387,7 @@ impl App {
 
     fn begin_label(&mut self) {
         let Some(tunnel) = self.selected_tunnel() else {
-            self.message = "labels currently apply to Mac-facing forwards".to_string();
+            self.message = "labels currently apply to client-facing forwards".to_string();
             return;
         };
         self.label_input = Some((tunnel.remote_port, tunnel.label.clone()));
@@ -395,7 +395,7 @@ impl App {
 
     fn begin_group(&mut self) {
         let Some(tunnel) = self.selected_tunnel() else {
-            self.message = "groups currently apply to Mac-facing forwards".to_string();
+            self.message = "groups currently apply to client-facing forwards".to_string();
             return;
         };
         self.group_input = Some((tunnel.remote_port, tunnel.group));
@@ -499,7 +499,7 @@ impl App {
 
     async fn move_selected(&mut self, scope: &str, direction: i8) {
         if self.reverse_mode {
-            self.message = "ordering currently applies to Mac-facing forwards".to_string();
+            self.message = "ordering currently applies to client-facing forwards".to_string();
             return;
         }
         let Some(port) = self.selected_port() else {
@@ -553,7 +553,7 @@ impl App {
             .status
             .as_ref()
             .map(|status| (status.host.as_str(), status.connected))
-            .unwrap_or(("ubuntu", false));
+            .unwrap_or(("remote", false));
         let indicator = if connected {
             "● connected"
         } else {
@@ -571,7 +571,7 @@ impl App {
             Paragraph::new(Line::from(vec![
                 Span::styled(" ports  ", active_tab),
                 Span::styled(
-                    "[1] Mac → Ubuntu",
+                    "[1] Client → Remote",
                     if self.reverse_mode {
                         Style::default()
                     } else {
@@ -580,7 +580,7 @@ impl App {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    "[2] Ubuntu → Mac",
+                    "[2] Remote → Client",
                     if self.reverse_mode {
                         active_tab
                     } else {
@@ -691,9 +691,9 @@ impl App {
         .block(
             Block::default()
                 .title(if self.reverse_mode {
-                    " Mac services exposed on Ubuntu "
+                    " Client services exposed on remote host "
                 } else {
-                    " Ubuntu services available on Mac "
+                    " Remote services available on client "
                 })
                 .borders(Borders::ALL),
         );
@@ -703,9 +703,9 @@ impl App {
             vec![Line::from(vec![
                 Span::styled(
                     if self.reverse_mode {
-                        "Ubuntu[:Mac] ports: "
+                        "remote[:client] ports: "
                     } else {
-                        "manual Ubuntu port: "
+                        "manual remote port: "
                     },
                     Style::default().fg(Color::Cyan),
                 ),

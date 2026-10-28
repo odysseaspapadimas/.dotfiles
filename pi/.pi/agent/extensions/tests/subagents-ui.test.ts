@@ -24,6 +24,8 @@ function harness() {
   const placements: string[] = [];
   const notices: string[] = [];
   const opens: any[] = [];
+  let widgetUpdates = 0;
+  let renderRequests = 0;
   const controller = registerSubagentUI({ registerCommand: (name: string, value: any) => {
     if (name === "subagents") command = value;
     else { assert.equal(name, "subagents-toggle"); toggleCommand = value; }
@@ -35,23 +37,127 @@ function harness() {
   const ctx = { mode: "tui", hasUI: true, ui: {
     notify: (message: string) => notices.push(message),
     setWidget: (key: string, value: any, options: any) => {
+      widgetUpdates++;
       if (value) { widgets.set(key, value); placements.push(options.placement); } else widgets.delete(key);
     },
     custom: (factory: any) => new Promise((resolve) => {
       done = resolve;
-      component = factory({ terminal: { rows: 40 }, requestRender() {} }, theme,
+      component = factory({ terminal: { rows: 40 }, requestRender() { renderRequests++; } }, theme,
         { matches: (data: string, action: string) => action === "tui.select.cancel" && matchesKey(data, "escape") }, resolve);
     }),
   } } as unknown as ExtensionContext;
   return { ctx, controller, widgets, placements, notices, opens,
     set rows(value: WorkerRow[]) { rows = value; }, set loader(value: typeof loader) { loader = value; },
     get component() { return component; },
+    get widgetUpdates() { return widgetUpdates; },
+    get renderRequests() { return renderRequests; },
     toggle: () => toggleCommand.handler("", ctx),
     async picker() { const promise = command.handler("", ctx); await new Promise((resolve) => setImmediate(resolve)); return { promise }; },
     close() { done(undefined); },
     widget: () => widgets.get("pi-subagents")?.({}, theme).render(100).join("\n") ?? "",
   };
 }
+
+test("startup does not await discovery; explicit refresh coalesces and stop aborts it", async () => {
+  const h = harness();
+  let resolve!: (rows: WorkerRow[]) => void;
+  let signal!: AbortSignal;
+  let calls = 0;
+  h.loader = async (_parent, abort) => {
+    calls++;
+    signal = abort;
+    return new Promise<WorkerRow[]>((done) => { resolve = done; });
+  };
+  try {
+    const started = h.controller.start(h.ctx);
+    await new Promise((done) => setImmediate(done));
+    // Assert settlement without awaiting a potentially blocking startup promise.
+    let ready = false;
+    void started.then(() => { ready = true; });
+    await new Promise((done) => setImmediate(done));
+    assert.equal(ready, true, "startup must complete while discovery remains pending");
+    assert.equal(h.widgets.size, 0);
+    let refreshed = false;
+    const refresh = h.controller.refresh().then(() => { refreshed = true; });
+    await new Promise((done) => setImmediate(done));
+    assert.equal(calls, 1, "explicit refresh reuses in-flight discovery");
+    assert.equal(refreshed, false, "explicit refresh still waits for results");
+    h.controller.stop();
+    assert.equal(signal.aborted, true);
+    resolve([workerRow(snapshot("late"), "working")]);
+    await refresh;
+    assert.equal(h.widgets.size, 0, "late results cannot publish after shutdown");
+  } finally {
+    h.controller.stop();
+    resolve?.([]);
+  }
+});
+
+test("unchanged refreshes skip widget remounts and picker repaints; changed results still repaint", async () => {
+  const h = harness();
+  try {
+    await h.controller.start(h.ctx);
+    await h.controller.refresh();
+    const updates = h.widgetUpdates;
+    const { promise } = await h.picker();
+    const renders = h.renderRequests;
+    for (let i = 0; i < 10; i++) await h.controller.refresh();
+    assert.equal(h.widgetUpdates, updates, "identical polls never remount the widget");
+    assert.equal(h.renderRequests, renders, "identical polls never rebuild the picker");
+    const changed = snapshot("a");
+    changed.messages[1].text = "New assistant result";
+    h.rows = [workerRow(changed, "working"), workerRow(snapshot("b"), "blocked"), workerRow(snapshot("c"), "stopped")];
+    await h.controller.refresh();
+    assert.equal(h.widgetUpdates, updates, "result changes do not affect the compact widget");
+    assert.equal(h.renderRequests, renders + 1, "result changes refresh picker previews");
+    h.rows = [workerRow(changed, "blocked")];
+    await h.controller.refresh();
+    assert.equal(h.widgetUpdates, updates + 1);
+    assert.match(h.widget(), /Worker a \(blocked\)/);
+    h.close(); await promise;
+  } finally { h.controller.stop(); }
+});
+
+test("idle polling slows to 15 seconds; active workers and open pickers poll every 3 seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = harness();
+  let calls = 0;
+  let rows: WorkerRow[] = [];
+  h.loader = async () => { calls++; return rows; };
+  try {
+    await h.controller.start(h.ctx);
+    await h.controller.refresh();
+    assert.equal(calls, 1);
+    t.mock.timers.tick(14_999);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    await h.controller.refresh();
+    assert.equal(calls, 2);
+    rows = [workerRow(snapshot(), "working")];
+    await h.controller.refresh();
+    t.mock.timers.tick(3000);
+    await h.controller.refresh();
+    assert.equal(calls, 4, "working children retain fast polling");
+    rows = [];
+    await h.controller.refresh();
+    const { promise } = await h.picker();
+    const opened = calls;
+    t.mock.timers.tick(3000);
+    await h.controller.refresh();
+    assert.equal(calls, opened + 1, "the picker stays responsive even with no active workers");
+    h.close(); await promise;
+    const closed = calls;
+    t.mock.timers.tick(14_999);
+    assert.equal(calls, closed);
+    t.mock.timers.tick(1);
+    await h.controller.refresh();
+    assert.equal(calls, closed + 1);
+    h.controller.stop();
+    const stopped = calls;
+    t.mock.timers.tick(60_000);
+    assert.equal(calls, stopped, "shutdown cancels polling");
+  } finally { h.controller.stop(); t.mock.timers.reset(); }
+});
 
 test("live states override old completion; outcomes survive runtime cleanup", () => {
   const s = snapshot();
@@ -112,6 +218,7 @@ test("late refresh cannot publish into a replacement session; errors preserve la
   const h = harness();
   try {
     await h.controller.start(h.ctx);
+    await h.controller.refresh();
     h.loader = async () => { throw new Error("snapshot unavailable"); };
     await h.controller.refresh();
     assert.match(h.widget(), /Status unavailable/);

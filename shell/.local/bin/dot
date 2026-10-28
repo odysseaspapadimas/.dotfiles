@@ -279,5 +279,7 @@ echo "dot: restowing ${available[*]}"
 # the resulting links. Unrelated Quattro configuration remains untouched.
 stow --ignore='(^|/)fish_variables$' --adopt -R -d "$repo" -t "$HOME" "${available[@]}"
 git -C "$repo" restore --worktree -- "${available[@]}"
+bash "$repo/bb/install-skills.sh"
+
 [[ $stow_only == true ]] || enable_services
 echo "dot: synchronized"

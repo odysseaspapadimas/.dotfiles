@@ -276,12 +276,17 @@ function receipt(response: Response, messageId: string): DeliveryReceipt {
   return delivery;
 }
 
+/** Resolve the receiver generation before the caller durably records a delivery ID. */
+export async function prepareMailbox(root: string, identity: MailboxIdentity, signal?: AbortSignal): Promise<{ runtimeId: string; messageId: string }> {
+  const hello = await request(root, identity, { action: "hello" }, signal);
+  if (typeof hello.runtimeId !== "string" || !/^[0-9a-f-]{36}$/u.test(hello.runtimeId)) throw new Error("Invalid mailbox handshake");
+  return { runtimeId: hello.runtimeId, messageId: `${hello.runtimeId}:${randomUUID()}` };
+}
+
 export async function sendMailbox(root: string, identity: MailboxIdentity, message: string, messageId?: string, signal?: AbortSignal, action: "send" | "report" = "send"): Promise<DeliveryReceipt> {
   try {
     if (!messageId) {
-      const hello = await request(root, identity, { action: "hello" }, signal);
-      if (typeof hello.runtimeId !== "string" || !/^[0-9a-f-]{36}$/u.test(hello.runtimeId)) throw new Error("Invalid mailbox handshake");
-      messageId = `${hello.runtimeId}:${randomUUID()}`;
+      messageId = (await prepareMailbox(root, identity, signal)).messageId;
     }
     const response = await request(root, identity, { action, message, messageId }, signal);
     const delivery = receipt(response, messageId);

@@ -860,7 +860,9 @@ export class ChangedFilesLedger {
 
   private async computeWorkspaceStats(before: Snapshot, after: Snapshot): Promise<WorkspaceDiffStats> {
     const paths = changedPaths(before, after);
-    const patch = await this.createPatch(before, after);
+    // Identical captures need neither materialized trees nor a Git diff process.
+    // Keep per-repository zero totals for callers displaying workspace stats.
+    const patch = paths.length ? await this.createPatch(before, after, paths) : "";
     return {
       total: statsFromPatch(patch, paths.length),
       repositories: repositoryStatsFromPatch(patch, paths, this.repositories),
@@ -1048,9 +1050,11 @@ export class ChangedFilesLedger {
     }
   }
 
-  private async materialize(snapshot: Snapshot, destination: string): Promise<void> {
+  private async materialize(snapshot: Snapshot, destination: string, paths: readonly string[]): Promise<void> {
     await mkdir(destination, { recursive: true });
-    for (const [relativePath, file] of Object.entries(snapshot.files)) {
+    for (const relativePath of paths) {
+      const file = snapshot.files[relativePath];
+      if (!file) continue;
       const target = join(destination, validateRelativePath(relativePath));
       await mkdir(dirname(target), { recursive: true });
       const content = await this.readBlob(file.hash, file.kind);
@@ -1062,12 +1066,16 @@ export class ChangedFilesLedger {
     }
   }
 
-  private async createPatch(before: Snapshot, after: Snapshot): Promise<string> {
+  private async createPatch(before: Snapshot, after: Snapshot, paths = changedPaths(before, after)): Promise<string> {
+    if (!paths.length) return "";
     const temporary = await mkdtemp(join(tmpdir(), "pi-changes-ledger-"));
     try {
+      // With rename detection disabled, unchanged paths cannot contribute to
+      // the patch. Materialize only changed leaves on each side, including
+      // mode/type changes, additions and deletions.
       await Promise.all([
-        this.materialize(before, join(temporary, "before")),
-        this.materialize(after, join(temporary, "after")),
+        this.materialize(before, join(temporary, "before"), paths),
+        this.materialize(after, join(temporary, "after"), paths),
       ]);
       const result = await this.pi.exec(
         "git",

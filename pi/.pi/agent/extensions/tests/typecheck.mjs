@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,12 +9,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = mkdtempSync(join(tmpdir(), "pi-extensions-typecheck-"));
 const paths = {};
 for (const name of ["pi-coding-agent", "pi-ai", "pi-agent-core", "pi-tui"]) {
-  const packageRoot = name === "pi-coding-agent" ? host : join(host, "node_modules", "@earendil-works", name);
+  const nestedRoot = join(host, "node_modules", "@earendil-works", name);
+  const packageRoot = name === "pi-coding-agent" ? host : existsSync(nestedRoot)
+    ? nestedRoot : join(host, "..", name);
   paths["@earendil-works/" + name] = [join(packageRoot, "dist", name === "pi-ai" ? "compat.d.ts" : "index.d.ts")];
   paths["@earendil-works/" + name + "/*"] = [join(packageRoot, "dist", "*.d.ts")];
 }
-paths.typebox = [join(host, "node_modules/typebox/build/index.d.mts")];
-paths["typebox/*"] = [join(host, "node_modules/typebox/build/*/index.d.mts")];
+const nestedTypebox = join(host, "node_modules/typebox");
+const typeboxRoot = existsSync(nestedTypebox) ? nestedTypebox : join(host, "..", "..", "typebox");
+paths.typebox = [join(typeboxRoot, "build/index.d.mts")];
+paths["typebox/*"] = [join(typeboxRoot, "build/*/index.d.mts")];
 const dependencies = join(root, "changed-files-ledger/node_modules");
 try {
   const config = join(temporary, "tsconfig.json");

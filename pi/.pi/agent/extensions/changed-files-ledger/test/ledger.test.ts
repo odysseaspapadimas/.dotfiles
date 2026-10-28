@@ -91,6 +91,22 @@ async function initRepo(path: string): Promise<void> {
   await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: path });
 }
 
+test("unchanged workspace stats skip patch generation and retain repository totals", async () => {
+  const ledger = new ChangedFilesLedger(fakePi(), "unchanged", "/tmp");
+  ledger.repositories = [
+    { name: "frontend", root: "/tmp/frontend", prefix: "frontend" },
+    { name: "backend", root: "/tmp/backend", prefix: "backend" },
+  ];
+  // Distinct snapshot objects must also take the no-change fast path.
+  const before = { createdAt: "2026-01-01T00:00:00.000Z", files: {} };
+  const after = { createdAt: "2026-01-02T00:00:00.000Z", files: {} };
+  (ledger as any).createPatch = async () => { assert.fail("unchanged snapshots must not generate a patch"); };
+  const zero = { files: 0, additions: 0, deletions: 0, binary: 0 };
+  assert.deepEqual(await ledger.calculateWorkspaceStats(before, after), {
+    total: zero, repositories: { frontend: zero, backend: zero },
+  });
+});
+
 test("refuses a non-Git home cwd before creating or scanning a cache", async () => {
   const cache = join(await temporaryDirectory("pi-ledger-home-guard-"), "cache-does-not-exist");
   const ledger = new ChangedFilesLedger(fakePi(), "session-home", process.env.HOME!, cache);
@@ -409,6 +425,45 @@ test("records repeated edits and untracked files as independent historical turns
   assert.match(patch, /diff --git a\/untracked\.txt b\/untracked\.txt/);
   assert.match(patch, /\+two/);
   assert.doesNotMatch(patch, /\+three/);
+});
+
+test("changed-path patches match full-tree diffs for text, binary, modes, links and file/directory transitions", async () => {
+  const repo = await temporaryDirectory("pi-ledger-selective-patch-");
+  const cache = await temporaryDirectory("pi-ledger-cache-");
+  await initRepo(repo);
+  await writeFile(join(repo, "unchanged.txt"), "unchanged content\n");
+  await writeFile(join(repo, "binary.bin"), Buffer.from([0, 1, 2]));
+  await writeFile(join(repo, "delete.txt"), "delete me\n");
+  await writeFile(join(repo, "shape"), "was a file\n");
+  await mkdir(join(repo, "collapse"));
+  await writeFile(join(repo, "collapse", "inner.txt"), "was nested\n");
+  await symlink("tracked.txt", join(repo, "link"));
+  const ledger = new ChangedFilesLedger(fakePi(), "selective-patch", repo, cache);
+  await ledger.initialize();
+  const before = ledger.index!.baseline;
+  await chmod(join(repo, "tracked.txt"), 0o755);
+  await writeFile(join(repo, "binary.bin"), Buffer.from([0, 3, 4]));
+  await rm(join(repo, "delete.txt"));
+  await rm(join(repo, "shape")); await mkdir(join(repo, "shape"));
+  await writeFile(join(repo, "shape", "inner.txt"), "now nested\n");
+  await rm(join(repo, "collapse"), { recursive: true });
+  await writeFile(join(repo, "collapse"), "now a file\n");
+  await rm(join(repo, "link")); await symlink("new file.txt", join(repo, "link"));
+  await writeFile(join(repo, "new file.txt"), "added\n");
+  const after = await ledger.captureSnapshot();
+  const original = (ledger as any).readBlob.bind(ledger);
+  const reads: string[] = [];
+  (ledger as any).readBlob = async (...args: any[]) => { reads.push(args[0]); return original(...args); };
+  const selective = await (ledger as any).createPatch(before, after);
+  assert.ok(!reads.includes(before.files["unchanged.txt"]!.hash), "unchanged blobs are not read or materialized");
+  assert.match(selective, /GIT binary patch/);
+  assert.match(selective, /old mode 100644\nnew mode 100755/);
+  assert.match(selective, /deleted file mode/);
+  assert.match(selective, /new file mode/);
+  const allPaths = [...new Set([...Object.keys(before.files), ...Object.keys(after.files)])].sort();
+  const full = await (ledger as any).createPatch(before, after, allPaths);
+  assert.ok(reads.includes(before.files["unchanged.txt"]!.hash));
+  assert.equal(selective, full, "selective materialization preserves the complete patch byte-for-byte");
 });
 
 test("restores persisted snapshots without embedding patches in the index", async () => {

@@ -33,7 +33,7 @@ The Git remote is the source of shared dotfiles. Commit/push intentional changes
 
 `pi/.pi/agent/settings.json` is a portable initial template, not live machine state. `dot` converts an old settings symlink to a private local file without losing its contents; Stow excludes the template. Device IDs, changelog state, provider logins, machine-specific packages and MCP configuration remain local. To apply later preference changes, update the local Pi settings deliberately; Git pulls do not overwrite them. Credentials, installed dependencies and runtime state are never published.
 
-Omarchy's Portd service now defaults to Debina. Machine-local systemd overrides remain outside this repository, and pulling dotfiles does not restart the service.
+Portd defaults to Debina on both Omarchy and macOS. Machine-local systemd overrides remain outside this repository, and pulling dotfiles does not rebuild Portd or restart it. For the Mac rebuild/reload steps, see [macOS services](macos/README.md#update-portd).
 
 ## Packages
 

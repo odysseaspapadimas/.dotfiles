@@ -59,6 +59,15 @@ test("session naming completes once without renaming a resumed or reloaded sessi
   assert.equal(state.names.length, 2);
 });
 
+test("custom-message runs do not consume first-user-message naming", async () => {
+  const state = setup({ modelAvailable: false });
+  state.emit("session_start", { reason: "new" });
+  await state.emit("before_agent_start", { messageType: "custom", message: { content: "Internal update" } });
+  assert.deepEqual(state.names, []);
+  await state.emit("before_agent_start", { messageType: "user", prompt: "First real user message" });
+  assert.deepEqual(state.names, ["First real user message"]);
+});
+
 test("missing OpenAI Luna keeps the prompt fallback instead of switching models or providers", async () => {
   const state = setup({ modelAvailable: false });
   state.emit("session_start", { reason: "new" });

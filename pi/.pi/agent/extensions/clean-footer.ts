@@ -3,6 +3,7 @@ import { isAbsolute, relative, sep } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { FAST_MODE_STATUS_KEY } from "./codex-fast-mode/index.ts";
 
 const singleLine = (text: string) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 const tokens = (n: number) => n < 1_000 ? `${n}` : n < 10_000 ? `${(n / 1_000).toFixed(1)}k`
@@ -12,7 +13,7 @@ const tokens = (n: number) => n < 1_000 ? `${n}` : n < 10_000 ? `${(n / 1_000).t
 function columns(left: string, right: string, width: number): string {
   if (width <= 0) return "";
   const clippedLeft = truncateToWidth(left, width, "…");
-  const available = width - visibleWidth(clippedLeft) - 2;
+  const available = width - visibleWidth(clippedLeft) - (clippedLeft ? 2 : 0);
   if (!right || available <= 0) return clippedLeft;
   const clippedRight = truncateToWidth(right, available, "…");
   return clippedLeft + " ".repeat(width - visibleWidth(clippedLeft) - visibleWidth(clippedRight)) + clippedRight;
@@ -187,8 +188,15 @@ export default function cleanFooter(pi: ExtensionAPI) {
           const pet = busy ? theme.fg("accent", "(=^･ω･^=) working")
             : known && percent > 90 ? theme.fg("warning", "(=O.O=) crowded")
             : theme.fg("dim", "(=-.-=) zzz");
-          const extras = clock + (width >= 100 ? separator + pet : "");
-          const statusText = statuses.map(([, text]) => singleLine(text)).join(separator);
+          let extras = clock + (width >= 100 ? separator + pet : "");
+          const fastStatus = singleLine(statuses.find(([key]) => key === FAST_MODE_STATUS_KEY)?.[1] ?? "");
+          if (fastStatus) {
+            // Reserve space for Fast Mode instead of losing it to long extension statuses.
+            const withFast = fastStatus + separator + extras;
+            extras = visibleWidth(withFast) <= width ? withFast : truncateToWidth(fastStatus, width, "");
+          }
+          const statusText = statuses.filter(([key]) => key !== FAST_MODE_STATUS_KEY)
+            .map(([, text]) => singleLine(text)).join(separator);
           const statusWidth = Math.max(0, width - visibleWidth(extras) - 2);
           lines.push(columns(truncateToWidth(statusText, statusWidth, "…"), extras, width));
           return lines;

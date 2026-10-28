@@ -1,0 +1,5 @@
+.pi-codex-usage-origin, .pi-codex-usage-accessory { display: inline-flex; align-items: center; flex-shrink: 0; }
+.pi-codex-usage-origin:empty { display: none; }
+.pi-codex-usage { display: inline-flex; align-items: center; border: 0; background: transparent; color: var(--muted-foreground); padding: 0 4px; font: inherit; font-size: 11px; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; cursor: pointer; opacity: .75; }
+.pi-codex-usage:hover { opacity: 1; }
+.pi-codex-usage:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 2px; }

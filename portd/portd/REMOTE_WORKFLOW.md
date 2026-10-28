@@ -1,14 +1,17 @@
-# Local client and Ubuntu workflow
+# Local client and remote-host workflow
 
 ## Daily entry point
 
 From the Omarchy or macOS client, attach with:
 
 ```sh
-herdr --remote ubuntu --session work --remote-keybindings server
+herdr-w
 ```
 
-The remote `work` session is kept alive by `herdr-work.service`. Its `Luca`
+This attaches to Debina's `default` session. To use the Ubuntu fallback, run
+`HERDR_DEV_HOST=ubuntu HERDR_DEV_SESSION=work herdr-w`.
+
+On Ubuntu, the remote `work` session is kept alive by `herdr-work.service`. Its `Luca`
 workspace is rooted at `~/Luca`, the parent of `luca-backend` and `luca-ims`.
 
 - Herdr prefix: `ctrl+space`
@@ -31,15 +34,17 @@ workspace is rooted at `~/Luca`, the parent of `luca-backend` and `luca-ims`.
 ## Ports
 
 `portd` runs on the local client and maintains one SSH control connection over
-the `ubuntu` SSH alias. The Ubuntu `ports` client reaches it through a reverse
-control channel, so browser opens and local listeners are created on the client.
+the `debina` SSH alias by default. The remote `ports` client reaches it through a
+reverse control channel, so browser opens and local listeners are created on the
+client. Remote loopback targets resolve `localhost`, including IPv6-only dev servers.
 On Omarchy it runs as `portd.service`; macOS uses its launch agent.
 
 The Herdr plugin refreshes discovery when panes start or exit. The standalone
-client remains available as `ports` on either machine. Press `1` for Ubuntu
-services exposed on the client and `2` for client services exposed on Ubuntu.
+client remains available as `ports` on either machine. Press `1` for remote
+services exposed on the client and `2` for client services exposed on the remote host.
 Reverse service choices are persistent; `43117` is the only automatic internal
-reverse because the remote client depends on it.
+reverse because the remote client depends on it. After syncing changes, rebuild
+and restart Portd on the client; see the [Mac update steps](../../macos/README.md#update-portd).
 
 ## Recovery
 
@@ -51,6 +56,6 @@ systemctl --user status portd.service  # Omarchy
 # Ubuntu Herdr status
 ssh ubuntu 'systemctl --user status herdr-work'
 
-# Reattach without Ghostty's initial command
-herdr --remote ubuntu --session work --remote-keybindings server
+# Reattach to Debina without Ghostty's initial command
+herdr-w
 ```

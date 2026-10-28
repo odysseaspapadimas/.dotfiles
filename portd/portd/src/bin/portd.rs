@@ -9,7 +9,7 @@ use portd::daemon;
     about = "Automatic SSH development-port forwarding daemon"
 )]
 struct Args {
-    #[arg(long, default_value = "ubuntu", env = "PORTD_HOST")]
+    #[arg(long, default_value = "debina", env = "PORTD_HOST")]
     host: String,
 
     #[arg(long, default_value_t = 43117, env = "PORTD_API_PORT")]
@@ -27,7 +27,7 @@ struct Args {
     #[arg(long, default_value_t = 10000, env = "PORTD_MAX_AUTO_PORT")]
     max_auto_port: u16,
 
-    /// Persistent reverse-forward seeds as UBUNTU_PORT:MAC_PORT. Repeat the
+    /// Persistent reverse-forward seeds as REMOTE_PORT:LOCAL_PORT. Repeat the
     /// flag or use a comma-separated PORTD_REVERSE_FORWARDS value.
     #[arg(
         long = "reverse-forward",
@@ -71,4 +71,26 @@ async fn main() -> anyhow::Result<()> {
         control_path: args.control_path,
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn defaults_to_debina() {
+        let command = Args::command();
+        let host = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "host")
+            .unwrap();
+        assert_eq!(host.get_default_values(), &["debina"]);
+    }
+
+    #[test]
+    fn allows_an_explicit_ubuntu_fallback() {
+        let args = Args::try_parse_from(["portd", "--host", "ubuntu"]).unwrap();
+        assert_eq!(args.host, "ubuntu");
+    }
 }

@@ -1,0 +1,14 @@
+.agent-todos { color: var(--ink); font-size: 12px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; overflow: hidden; margin-bottom: 6px; }
+.agent-todos-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; background: transparent; color: inherit; border: 0; text-align: left; cursor: pointer; font: inherit; }
+.agent-todos-toggle:hover { background: color-mix(in srgb, currentColor 5%, transparent); }
+.agent-todos-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+.agent-todos-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-todos-count { font-variant-numeric: tabular-nums; opacity: .65; }
+.agent-todos-chevron { opacity: .6; }
+.agent-todos-list { list-style: none; margin: 0; padding: 0 10px 8px; max-height: 220px; overflow-y: auto; }
+.agent-todos-list li { display: flex; gap: 8px; padding: 5px 0; overflow-wrap: anywhere; }
+.agent-todos-marker { flex: 0 0 14px; }
+.agent-todos-list li[data-status="in_progress"] { font-weight: 600; }
+.agent-todos-list li[data-status="completed"] { opacity: .55; }
+.agent-todos-list small { font-weight: normal; opacity: .65; }
+.agent-todos-error { padding: 2px 10px 8px; opacity: .7; }

@@ -1,5 +1,7 @@
 import { SessionManager, parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 export const METADATA_TYPE = "pi-session-orchestrator";
@@ -87,14 +89,87 @@ export async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-/** Read-only projections, never cached mutable SessionManagers. No disk index to migrate. */
+const INDEX_VERSION = 1;
+const MAX_INDEX_BYTES = 16 * 1024 * 1024;
+interface CatalogueEntry { stamp: string; session: ManagedSession }
+
+function validCatalogueEntry(value: unknown, path: string): value is CatalogueEntry {
+  if (!value || typeof value !== "object") return false;
+  const { stamp, session: s } = value as CatalogueEntry;
+  if (typeof stamp !== "string" || !/^\d+:\d+:\d+:[\d.]+:[\d.]+$/.test(stamp) || !s || typeof s !== "object") return false;
+  return s.sessionPath === path && resolve(path) === path &&
+    [s.id, s.sessionId, s.name, s.cwd].every((field) => typeof field === "string") &&
+    Number.isFinite(s.createdAt) && Number.isFinite(s.updatedAt) &&
+    [s.provider, s.model, s.thinking, s.parentSessionId].every((field) => field === undefined || typeof field === "string") &&
+    ["persistent", "task"].includes(s.lifecycle) && ["created", "historical"].includes(s.origin) &&
+    typeof s.orchestrated === "boolean";
+}
+
+/** Read-only projections; the disposable disk index stores metadata, never transcript bodies. */
 export class SessionStore {
   private cache = new Map<string, { stamp: string; value: SessionSnapshot; bytes: number }>();
   private bytes = 0;
-  private catalogue = new Map<string, { stamp: string; session: ManagedSession }>();
-  constructor(private root: string) {}
+  private catalogue = new Map<string, CatalogueEntry>();
+  private indexLoaded?: Promise<void>;
+  private indexSave: Promise<void> = Promise.resolve();
+  private revision = 0;
+  private savedRevision = 0;
+  private indexPath: string | null;
+  constructor(private root: string, indexPath?: string | null) {
+    this.indexPath = indexPath === undefined ? join(homedir(), ".cache", "pi-sessions",
+      `${createHash("sha256").update(resolve(root)).digest("hex")}.json`) : indexPath;
+  }
 
-  clear(): void { this.cache.clear(); this.catalogue.clear(); this.bytes = 0; }
+  clear(): void {
+    this.cache.clear(); this.catalogue.clear(); this.bytes = 0;
+    this.revision++;
+    // An explicit clear forces the next scan to rebuild rather than rehydrate.
+    this.indexLoaded = Promise.resolve();
+  }
+
+  private ensureIndex(): Promise<void> {
+    return this.indexLoaded ??= (async () => {
+      if (!this.indexPath) return;
+      try {
+        if ((await stat(this.indexPath)).size > MAX_INDEX_BYTES) return;
+        const index = JSON.parse(await readFile(this.indexPath, "utf8"));
+        if (index.version !== INDEX_VERSION || index.root !== resolve(this.root) || !Array.isArray(index.entries)) return;
+        for (const entry of index.entries) {
+          if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" ||
+            !validCatalogueEntry(entry[1], entry[0])) continue;
+          // A direct load may already have obtained fresher metadata.
+          if (!this.catalogue.has(entry[0])) {
+            const value: CatalogueEntry = entry[1];
+            // JSON omits undefined properties; keep the same projection shape
+            // as load() for callers comparing cached and freshly read metadata.
+            value.session = { ...value.session, provider: value.session.provider,
+              model: value.session.model, thinking: value.session.thinking,
+              parentSessionId: value.session.parentSessionId };
+            this.catalogue.set(entry[0], value);
+          }
+        }
+      } catch { /* Missing, corrupt, or inaccessible indexes are disposable. */ }
+    })();
+  }
+
+  private saveIndex(): Promise<void> {
+    // Serialize writes within this store. Across processes, atomic rename plus
+    // per-file stamp validation makes an older winning index safe to reuse.
+    return this.indexSave = this.indexSave.then(async () => {
+      if (!this.indexPath || this.revision === this.savedRevision) return;
+      const revision = this.revision;
+      const content = JSON.stringify({ version: INDEX_VERSION, root: resolve(this.root), entries: [...this.catalogue] });
+      if (Buffer.byteLength(content) > MAX_INDEX_BYTES) return;
+      const temporary = `${this.indexPath}.${randomUUID()}.tmp`;
+      try {
+        await mkdir(dirname(this.indexPath), { recursive: true, mode: 0o700 });
+        await writeFile(temporary, content, { mode: 0o600, flag: "wx" });
+        await rename(temporary, this.indexPath);
+        this.savedRevision = revision;
+      } catch { /* Cache failures must not prevent session discovery. */ }
+      finally { await unlink(temporary).catch(() => {}); }
+    });
+  }
 
   private async stamp(path: string) {
     const info = await stat(path);
@@ -161,6 +236,7 @@ export class SessionStore {
       userEntryIds: new Set(messages.filter((entry) => entry.role === "user").map((entry) => entry.id)),
     };
     this.catalogue.set(path, { stamp, session: value.session });
+    this.revision++;
     if (previous) { this.bytes -= previous.bytes; this.cache.delete(path); }
     // Bound retained transcript memory. Large sessions are still searchable, just not cached.
     const bytes = messages.reduce((sum, entry) => sum + entry.text.length * 2 + 160, 0);
@@ -176,14 +252,30 @@ export class SessionStore {
     return value;
   }
 
-  async *scan(signal?: AbortSignal): AsyncGenerator<SessionSnapshot> {
+  async *scan(signal?: AbortSignal, filter?: (session: ManagedSession) => boolean): AsyncGenerator<SessionSnapshot> {
+    if (filter) await this.ensureIndex();
     for await (const path of this.paths(signal)) {
-      try { yield await this.load(path, signal); }
-      catch { signal?.throwIfAborted(); /* Deleted/malformed files do not hide healthy sessions. */ }
+      try {
+        if (filter) {
+          const { stamp } = await this.stamp(path);
+          const previous = this.catalogue.get(path);
+          if (previous?.stamp === stamp && !filter(previous.session)) continue;
+        }
+        // On a cold index, parse each file once rather than first building a
+        // complete list and then loading eligible transcripts a second time.
+        const snapshot = await this.load(path, signal);
+        if (!filter || filter(snapshot.session)) yield snapshot;
+      } catch { signal?.throwIfAborted(); /* Deleted/malformed files do not hide healthy sessions. */ }
+    }
+    if (filter) {
+      signal?.throwIfAborted();
+      await this.saveIndex();
     }
   }
 
   async list(signal?: AbortSignal): Promise<ManagedSession[]> {
+    await this.ensureIndex();
+    signal?.throwIfAborted();
     const sessions: ManagedSession[] = [];
     for await (const path of this.paths(signal)) {
       try {
@@ -192,6 +284,8 @@ export class SessionStore {
         sessions.push(previous?.stamp === stamp ? previous.session : (await this.load(path, signal)).session);
       } catch { signal?.throwIfAborted(); }
     }
+    signal?.throwIfAborted();
+    await this.saveIndex();
     return sessions;
   }
 
@@ -214,7 +308,10 @@ export class SessionStore {
         yield path;
       }
     }
-    for (const path of this.catalogue.keys()) if (!seen.has(path)) this.catalogue.delete(path);
+    for (const path of this.catalogue.keys()) if (!seen.has(path)) {
+      this.catalogue.delete(path);
+      this.revision++;
+    }
     for (const [path, cached] of this.cache) {
       if (!seen.has(path)) { this.bytes -= cached.bytes; this.cache.delete(path); }
     }

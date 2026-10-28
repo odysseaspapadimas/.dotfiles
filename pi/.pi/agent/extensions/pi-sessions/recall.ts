@@ -42,9 +42,12 @@ export async function recall(store: SessionStore, options: RecallOptions, signal
   const hits: RecallHit[] = [];
   const cwd = options.cwd?.trim().toLowerCase();
   let scanned = 0;
-  for await (const snapshot of store.scan(signal)) {
+  const eligible = (session: ManagedSession) => session.sessionPath !== options.excludePath &&
+    (!cwd || session.cwd.toLowerCase().includes(cwd));
+  for await (const snapshot of store.scan(signal, eligible)) {
     const { session } = snapshot;
-    if (session.sessionPath === options.excludePath || (cwd && !session.cwd.toLowerCase().includes(cwd))) continue;
+    // Recheck freshly loaded metadata in case a file changed after listing.
+    if (!eligible(session)) continue;
     scanned++;
     const entries = snapshot.messages.filter((entry) => entry.text &&
       (options.after === undefined || entry.timestamp >= options.after) &&

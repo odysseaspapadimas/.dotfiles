@@ -20,6 +20,7 @@ const { SessionMailbox, mailboxPending, mailboxStatus, sendMailbox } = await imp
 const { recall, conversationPage } = await import("../pi-sessions/recall.ts");
 const { runState } = await import("../pi-sessions/runs.ts");
 const { Value } = await import("typebox/value");
+const { FAST_MODE_STATE_ENTRY_TYPE, restoreFastMode } = await import("../codex-fast-mode/index.ts");
 
 assert.deepEqual(parseModelOverride("openai-codex/gpt-5.6-luna"), {
   provider: "openai-codex",
@@ -87,6 +88,7 @@ let nextRuntime = 1;
 let acceptNextInitialPrompt = true;
 let failTabClose = false;
 const herdrCalls: string[][] = [];
+const launchedFastStates = new Map<string, boolean>();
 let settlingPath: string | undefined;
 
 function settle(path: string) {
@@ -206,6 +208,7 @@ const fakePi: any = {
       if (text.startsWith("pi --session ")) {
         const match = text.match(/--session '([^']+)'/);
         assert.ok(match);
+        launchedFastStates.set(match[1], restoreFastMode(SessionManager.open(match[1]).getBranch()));
         const hasAssistant = SessionManager.open(match[1]).getBranch().some(
           (entry: any) => entry.type === "message" && entry.message.role === "assistant",
         );
@@ -291,6 +294,11 @@ try {
   assert.ok(registered.promptGuidelines.some((guideline: string) =>
     guideline.includes("call resume without message, then focus")));
   assert.ok(Value.Check(registered.parameters, { action: "report", id: "target", message: "update" }));
+  for (const fast of [true, false]) {
+    assert.ok(Value.Check(registered.parameters, { action: "create", name: "Fast probe", message: "probe", fast }));
+  }
+  assert.equal(Value.Check(registered.parameters, { action: "create", name: "Fast probe", message: "probe", fast: "on" }), false);
+  assert.match(registered.parameters.properties.fast.description, /defaults to off/);
   assert.ok(registered.promptGuidelines.some((guideline: string) => guideline.includes("Use report")));
   let result = await execute({ action: "list" });
   assert.match(result.content[0].text, /dir_legacy/);
@@ -513,6 +521,28 @@ try {
   await execute({ action: "stop", id: incompletePayload.sessionId });
   await unlink(incompletePayload.sessionPath);
 
+  // Fast Mode is seeded before launch, persists on resume, and is not inherited.
+  const fastParent = SessionManager.open(externalPath);
+  fastParent.appendCustomEntry(FAST_MODE_STATE_ENTRY_TYPE, { enabled: true });
+  for (const fast of [true, false, undefined]) {
+    const fastResult = await execute({ action: "create", name: `Fast probe ${fast}`,
+      message: "check Fast Mode", model: "openai/gpt-6.1-sol", fast }, fastParent);
+    const child = fastResult.details.session;
+    const expected = fast === true;
+    assert.equal(launchedFastStates.get(child.sessionPath), expected, "Fast Mode is set before the first prompt");
+    assert.equal(restoreFastMode(SessionManager.open(child.sessionPath).getBranch()), expected);
+    assert.match(fastResult.content[0].text, new RegExp(`Fast Mode: ${expected ? "on" : "off"}`));
+    if (fast === undefined) {
+      assert.equal(SessionManager.open(child.sessionPath).getBranch().some((entry: any) =>
+        entry.type === "custom" && entry.customType === FAST_MODE_STATE_ENTRY_TYPE), false);
+    }
+    await execute({ action: "stop", id: child.id });
+    await execute({ action: "resume", id: child.id });
+    assert.equal(launchedFastStates.get(child.sessionPath), expected, "resume keeps the selected Fast Mode state");
+    await execute({ action: "stop", id: child.id });
+    await unlink(child.sessionPath);
+  }
+
   result = await execute({
     action: "create",
     name: "Lifecycle",
@@ -716,6 +746,10 @@ try {
     }),
   } };
   await eventHandlers.get("session_start")?.({}, uiContext);
+  // Startup now returns before background discovery populates the widget.
+  const widgetDeadline = Date.now() + 5_000;
+  while (!widget && Date.now() < widgetDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(typeof widget, "function", "background discovery populates the widget");
   assert.match(widget({}, uiTheme).render(100).join("\n"), /UI child \(running\)/);
   await commands.get("subagents").handler("", uiContext);
   uiPane.agent_status = "idle";

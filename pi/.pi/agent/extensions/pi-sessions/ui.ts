@@ -20,6 +20,8 @@ const colors = { running: "warning", blocked: "warning", failed: "error", aborte
   idle: "muted", stopped: "dim", multiple: "error", unknown: "muted" } as const;
 const glyphs = { running: "◐", blocked: "!", failed: "✗", aborted: "✗", done: "✓", idle: "○", stopped: "○", multiple: "!", unknown: "?" } as const;
 const key = "pi-subagents";
+const ACTIVE_POLL_MS = 3000;
+const IDLE_POLL_MS = 15_000;
 const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 
 export function workerRow(snapshot: SessionSnapshot, runtimeStatus: string, outcome = runState(snapshot, runtimeStatus).outcome): WorkerRow {
@@ -60,32 +62,59 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
     abort: AbortController;
     rows: WorkerRow[];
     loading?: Promise<void>;
-    timer?: ReturnType<typeof setInterval>;
+    timer?: ReturnType<typeof setTimeout>;
     repaint?: () => void;
     error?: string;
     hidden?: boolean;
+    widgetSignature?: string;
+    publishedRows?: WorkerRow[];
+    publishedError?: string;
   }
   let binding: Binding | undefined;
   const publish = (b: Binding) => {
     if (binding !== b || b.abort.signal.aborted) return;
     const active = widgetRows(b.rows);
-    if (b.hidden || !active.length && !b.error) { b.ctx.ui.setWidget(key, undefined); b.repaint?.(); return; }
-    b.ctx.ui.setWidget(key, (_tui, theme) => ({
-      render(width) {
-        const lines = [theme.fg("accent", "● Subagents")];
-        const visible = active.slice(0, 6);
-        visible.forEach((row, index) => lines.push(
-          theme.fg("dim", index === visible.length - 1 && active.length <= 6 && !b.error ? "└─ " : "├─ ") +
-          theme.fg(colors[row.state], glyphs[row.state]) + " " + clean(row.session.name).replace(/\n/g, " ") +
-          theme.fg("dim", ` (${row.state})`),
-        ));
-        if (active.length > 6) lines.push(theme.fg("dim", `└─ +${active.length - 6} more · /subagents`));
-        if (b.error) lines.push(theme.fg("warning", "└─ Status unavailable · /subagents to retry"));
-        return [...lines, ""].map((line) => truncateToWidth(line, width));
-      },
-      invalidate() {},
-    }), { placement: "aboveEditor" });
-    b.repaint?.();
+    const visibleWidget = !b.hidden && (active.length > 0 || Boolean(b.error));
+    const signature = JSON.stringify(visibleWidget ? [active.length, Boolean(b.error),
+      active.slice(0, 6).map((row) => [clean(row.session.name).replace(/\n/g, " "), row.state])] : null);
+    const rowsChanged = !b.publishedRows || b.rows.length !== b.publishedRows.length ||
+      b.rows.some((row, index) => {
+        const previous = b.publishedRows![index];
+        return row.state !== previous.state || row.session.sessionPath !== previous.session.sessionPath ||
+          row.session.name !== previous.session.name || row.session.updatedAt !== previous.session.updatedAt ||
+          row.preview !== previous.preview || row.result !== previous.result;
+      });
+    const repaint = rowsChanged || b.error !== b.publishedError;
+    b.publishedRows = b.rows;
+    b.publishedError = b.error;
+    if (b.widgetSignature !== signature) {
+      b.widgetSignature = signature;
+      if (!visibleWidget) b.ctx.ui.setWidget(key, undefined);
+      else b.ctx.ui.setWidget(key, (_tui, theme) => ({
+        render(width) {
+          const lines = [theme.fg("accent", "● Subagents")];
+          const visible = active.slice(0, 6);
+          visible.forEach((row, index) => lines.push(
+            theme.fg("dim", index === visible.length - 1 && active.length <= 6 && !b.error ? "└─ " : "├─ ") +
+            theme.fg(colors[row.state], glyphs[row.state]) + " " + clean(row.session.name).replace(/\n/g, " ") +
+            theme.fg("dim", ` (${row.state})`),
+          ));
+          if (active.length > 6) lines.push(theme.fg("dim", `└─ +${active.length - 6} more · /subagents`));
+          if (b.error) lines.push(theme.fg("warning", "└─ Status unavailable · /subagents to retry"));
+          return [...lines, ""].map((line) => truncateToWidth(line, width));
+        },
+        invalidate() {},
+      }), { placement: "aboveEditor" });
+    }
+    if (repaint) b.repaint?.();
+  };
+  const schedule = (b: Binding): void => {
+    if (binding !== b || b.abort.signal.aborted || !b.parentId) return;
+    if (b.timer) clearTimeout(b.timer);
+    const busy = Boolean(b.repaint) || b.rows.some((row) =>
+      ["running", "blocked", "multiple", "unknown"].includes(row.state));
+    b.timer = setTimeout(() => { b.timer = undefined; void refresh(b); }, busy ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+    b.timer.unref();
   };
   const refresh = (b = binding): Promise<void> => {
     if (!b || !b.parentId || b.abort.signal.aborted) return Promise.resolve();
@@ -101,7 +130,7 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
         b.error = clean(String(error));
       }
       publish(b);
-    })().finally(() => { b.loading = undefined; });
+    })().finally(() => { b.loading = undefined; schedule(b); });
     return b.loading;
   };
   const stop = () => {
@@ -109,7 +138,7 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
     const old = binding;
     binding = undefined;
     old.abort.abort();
-    if (old.timer) clearInterval(old.timer);
+    if (old.timer) clearTimeout(old.timer);
     old.ctx.ui.setWidget(key, undefined);
   };
   const start = async (ctx: ExtensionContext) => {
@@ -120,10 +149,10 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
     try { b.parentId = await source.parentId(ctx); }
     catch { if (binding === b) stop(); return; }
     if (binding !== b || b.abort.signal.aborted || !b.parentId) return;
-    await refresh(b);
-    if (binding !== b || b.abort.signal.aborted) return;
-    b.timer = setInterval(() => { void refresh(b); }, 3000);
-    b.timer.unref();
+    // Session discovery can scan a large history. Populate the widget in the
+    // background instead of holding up session_start; /subagents still awaits
+    // refresh explicitly, and refresh coalesces concurrent requests.
+    void refresh(b);
   };
 
   pi.registerCommand("subagents-toggle", {
@@ -172,6 +201,7 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
         };
         rebuild();
         b.repaint = () => { if (!closed) { rebuild(); tui.requestRender(); } };
+        schedule(b);
         return {
           render(width) {
             if (width <= 0) return [];
@@ -210,10 +240,11 @@ export function registerSubagentUI(pi: ExtensionAPI, source: SubagentSource) {
             } else list.handleInput(matchesKey(data, "j") ? "\x1b[B" : matchesKey(data, "k") ? "\x1b[A" : data);
             tui.requestRender();
           },
-          dispose() { closed = true; b.repaint = undefined; },
+          dispose() { closed = true; b.repaint = undefined; schedule(b); },
         };
       }, { overlay: true, overlayOptions: { width: 72, maxHeight: "85%", margin: 1 } });
       b.repaint = undefined;
+      schedule(b);
       if (!action || b.abort.signal.aborted) return;
       try { await source.open(b.parentId, action.path, action.reopen, b.abort.signal); }
       catch (error) { if (!b.abort.signal.aborted) ctx.ui.notify(clean(String(error)), "error"); }

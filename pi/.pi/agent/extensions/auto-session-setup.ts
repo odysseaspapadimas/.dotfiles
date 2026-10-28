@@ -60,7 +60,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── On first user message, generate session name asynchronously ──────
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!isFirstMessage) return;
+		if (!isFirstMessage || !("prompt" in event)) return;
 		isFirstMessage = false;
 
 		const userMessage = event.prompt?.trim();

@@ -1,8 +1,9 @@
-# Codex Fast Mode
+# OpenAI Fast Mode
 
-A small Pi extension that enables OpenAI Codex Fast Mode by combining Pi's
-native provider with a `before_provider_request` hook that adds
-`service_tier: "priority"`, and the Codex WebSocket originator
+A small Pi extension that enables Fast Mode on Pi's native `openai` and
+`openai-codex` providers with a `before_provider_request` hook that adds
+`service_tier: "priority"` (the compatible wire value; some endpoints reject
+`"fast"`). For Codex only, it also sets the WebSocket originator
 identifier (`originator: "codex_cli_rs"`) required by the ChatGPT OAuth backend.
 
 ## Usage
@@ -17,12 +18,21 @@ identifier (`originator: "codex_cli_rs"`) required by the ChatGPT OAuth backend.
 Fast Mode defaults to off. Its state is stored in the current session branch,
 so it survives reloads and resumes while remaining branch-aware.
 
-When Fast Mode is active for the selected model, a minimal accent-colored
-`fast` marker is shown last on Pi's extension-status footer line.
+To enable it from the first request in a session created with `pi_sessions`,
+pass `"fast": true` to `action: "create"`. Omit `fast` or pass `false` to keep it
+off; the parent session's Fast Mode state is not inherited.
+
+When Fast Mode is active for the selected model, an accent-colored `fast`
+marker appears immediately left of the session lifetime in the rich footer.
+Space is reserved so other extension statuses cannot truncate it; Pi's default
+footer shows it first. When enabled on an unsupported model or provider, the
+footer shows a dim `fast (inactive)` instead. Turning Fast Mode off removes
+the marker.
 
 ## Supported models
 
-Only ChatGPT-authenticated `openai-codex` requests are changed:
+The following models are supported on `openai` (Responses or Chat Completions)
+and ChatGPT-authenticated `openai-codex`:
 
 - `gpt-5.4`
 - `gpt-5.5`
@@ -34,9 +44,15 @@ Only ChatGPT-authenticated `openai-codex` requests are changed:
 - `gpt-6-sol`
 - `gpt-6.1-sol`
 
-Codex Spark and mini models are deliberately left unchanged. The extension
-does not affect the API-key-backed `openai` provider, avoiding accidental API
-Priority Processing charges.
+Codex Spark, mini models, and unrelated providers are deliberately left unchanged.
 
-Fast Mode consumes ChatGPT Codex credits faster than standard mode. See
-[OpenAI's speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed).
+## Billing
+
+Fast Mode is an explicit opt-in through `/fast on` (or `/fast` to toggle):
+
+- On `openai`, Fast Mode incurs premium API token rates. See [OpenAI's API Fast Mode documentation](https://developers.openai.com/api/docs/guides/fast-mode).
+- On `openai-codex`, Fast Mode consumes subscription usage or credits faster
+  than standard mode. See [OpenAI's Codex speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed).
+
+The footer reflects the requested mode, not a guarantee of the tier served;
+the API may downgrade requests to standard processing.

@@ -11,7 +11,7 @@ import { getModel } from "@earendil-works/pi-ai";
 
 // This suite checks the actual configured packages through Pi's real jiti loader
 // and SDK runner. It never prompts a model or controls a live Herdr pane.
-test("all configured extensions load and complete a Pi 1.0 lifecycle", async () => {
+test("all configured extensions load and complete the installed Pi lifecycle", async () => {
   const agentDir = process.env.PI_TEST_AGENT_DIR ?? join(homedir(), ".pi", "agent");
   const configured = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8"));
   const root = await mkdtemp(join(tmpdir(), "pi-extension-compatibility-"));
@@ -24,6 +24,7 @@ test("all configured extensions load and complete a Pi 1.0 lifecycle", async () 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("{}", { status: 503 });
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+  let shutdown = false;
   const errors: ExtensionError[] = [];
   try {
     const settingsManager = SettingsManager.inMemory(configured);
@@ -50,7 +51,7 @@ test("all configured extensions load and complete a Pi 1.0 lifecycle", async () 
       undefined, undefined, runner.createToolContext("structured-session-probe", undefined));
     assert.equal((probe.structuredContent as { action: string }).action, "list");
 
-    await runner.emitBeforeAgentStart("compatibility probe", undefined, { cwd: root, selectedTools: [] });
+    await runner.emitBeforeAgentStart({ messageType: "user", prompt: "compatibility probe", images: undefined }, { cwd: root, selectedTools: [] });
     const messages = await runner.emitContext([
       { role: "system", content: "Compatibility test", timestamp: 0 },
       { role: "user", content: "probe", timestamp: 1 },
@@ -69,10 +70,15 @@ test("all configured extensions load and complete a Pi 1.0 lifecycle", async () 
     await runner.emit({ type: "agent_end", messages: [] });
     await runner.emit({ type: "agent_settled", outcome: "completed" } as any);
     await runner.emit({ type: "session_shutdown", reason: "quit" });
+    shutdown = true;
     assert.deepEqual(errors, [], JSON.stringify(errors));
   } finally {
-    session?.dispose();
-    globalThis.fetch = originalFetch;
-    await rm(root, { recursive: true, force: true });
+    try {
+      if (session && !shutdown) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    } finally {
+      session?.dispose();
+      globalThis.fetch = originalFetch;
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });

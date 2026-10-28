@@ -592,7 +592,7 @@ async fn start_forward(runtime: &Runtime, remote_port: u16) -> anyhow::Result<u1
         if reserved.contains(&local_port) || !port_available(local_port) {
             continue;
         }
-        let spec = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
+        let spec = local_forward_spec(local_port, remote_port);
         let output = Command::new("ssh")
             .arg("-S")
             .arg(&runtime.control_path)
@@ -613,7 +613,7 @@ async fn cancel_forward(
     local_port: u16,
     remote_port: u16,
 ) -> anyhow::Result<()> {
-    let spec = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
+    let spec = local_forward_spec(local_port, remote_port);
     let output = Command::new("ssh")
         .arg("-S")
         .arg(&runtime.control_path)
@@ -627,6 +627,12 @@ async fn cancel_forward(
         bail!("failed to cancel localhost:{local_port}: {}", detail.trim())
     }
     Ok(())
+}
+
+fn local_forward_spec(local_port: u16, remote_port: u16) -> String {
+    // Resolve loopback on the remote host so IPv6-only dev servers (e.g. Vite
+    // on ::1) work too. Keep the client listener explicitly loopback-only.
+    format!("127.0.0.1:{local_port}:localhost:{remote_port}")
 }
 
 fn candidate_ports(preferred: u16) -> impl Iterator<Item = u16> {
@@ -857,7 +863,9 @@ async fn api_reverse_toggle(
         Some(existing_local) => {
             return (
                 StatusCode::CONFLICT,
-                format!("Ubuntu port {remote_port} is already mapped to Mac port {existing_local}"),
+                format!(
+                    "remote port {remote_port} is already mapped to client port {existing_local}"
+                ),
             )
                 .into_response();
         }
@@ -1287,6 +1295,26 @@ mod tests {
         );
         assert_eq!(ports[&5173].process, "node");
         assert_eq!(ports[&8000].process, "php8.5");
+    }
+
+    #[test]
+    fn parses_ipv6_only_loopback_dev_server() {
+        let ports =
+            parse_listeners("LISTEN 0 511 [::1]:5173 [::]:* users:((\"node\",pid=2,fd=8))\n");
+        assert_eq!(ports[&5173].port, 5173);
+        assert_eq!(ports[&5173].process, "node");
+    }
+
+    #[test]
+    fn local_forward_uses_remote_localhost_for_both_address_families() {
+        assert_eq!(
+            local_forward_spec(5173, 5173),
+            "127.0.0.1:5173:localhost:5173"
+        );
+        assert_eq!(
+            local_forward_spec(5174, 5173),
+            "127.0.0.1:5174:localhost:5173"
+        );
     }
 
     #[test]

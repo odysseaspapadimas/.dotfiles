@@ -25,7 +25,9 @@ export async function resolve(specifier, context, nextResolve) {
   if (specifier.startsWith(prefix)) {
     const [name, ...subpath] = specifier.slice(prefix.length).split("/");
     if (["pi-coding-agent", "pi-ai", "pi-agent-core", "pi-tui"].includes(name)) {
-      const root = name === "pi-coding-agent" ? host : join(host, "node_modules", prefix + name);
+      const nestedRoot = join(host, "node_modules", prefix + name);
+      const root = name === "pi-coding-agent" ? host : existsSync(nestedRoot)
+        ? nestedRoot : join(host, "..", name);
       // Pi's jiti loader intentionally maps the pi-ai root to its compat entrypoint.
       const entry = subpath.length ? subpath.join("/") : name === "pi-ai" ? "compat" : "index";
       return { url: pathToFileURL(join(root, "dist", entry + ".js")).href, shortCircuit: true };

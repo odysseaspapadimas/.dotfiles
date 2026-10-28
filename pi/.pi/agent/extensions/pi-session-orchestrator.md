@@ -123,6 +123,8 @@ starts another model turn.
 
 - `create`: requires a name and self-contained starting message. New sessions
   inherit the current model and thinking level, not the current conversation.
+  Set `fast: true` to enable Fast Mode before the first request; omitted or
+  `false` defaults to off, independent of the parent's Fast Mode state.
 - `send`: uses the session-bound mailbox for running sessions, including
   discovered sessions. An idle receiver calls Pi's `sendUserMessage()` directly;
   a busy receiver holds the follow-up until idle. Drafts are never read, altered,
@@ -152,6 +154,16 @@ Model override example:
 
 Models must use `provider/model` format. Invalid overrides fail before creating
 a file or tab. The override is retained when resuming.
+
+Fast Mode example:
+
+```json
+{"action":"create","name":"Fast worker","message":"Review the cache implementation; report findings only.","lifecycle":"task","model":"openai/gpt-6.1-sol","fast":true}
+```
+
+The flag is saved in the child session before it launches, so it applies from
+the first request and survives reload/resume. It uses `service_tier: "priority"`
+on supported OpenAI models. `/fast off` in the child turns it off again.
 
 ## Mailbox delivery and retries
 

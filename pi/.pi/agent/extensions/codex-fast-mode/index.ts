@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 
-const STATE_ENTRY_TYPE = "codex-fast-mode-state-v1";
+export const FAST_MODE_STATE_ENTRY_TYPE = "codex-fast-mode-state-v1";
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const WEBSOCKET_PATCH_KEY = Symbol.for("codex-fast-mode.websocket-patch");
 type WebSocketPatchState = { enabled: boolean; installed: boolean };
@@ -30,8 +30,8 @@ function installWebSocketOriginatorPatch(): WebSocketPatchState {
 	return state;
 }
 
-// Built-in footer sorts extension statuses by key. The zz- prefix keeps this last.
-const STATUS_KEY = "zz-codex-fast-mode";
+// Keep the marker first in Pi's default footer; the rich footer pins it separately.
+export const FAST_MODE_STATUS_KEY = "00-codex-fast-mode";
 
 export const FAST_MODE_MODEL_IDS = new Set([
 	"gpt-5.4",
@@ -48,9 +48,9 @@ export const FAST_MODE_MODEL_IDS = new Set([
 export type FastModeModel = Pick<Model<any>, "provider" | "api" | "id">;
 
 export function supportsFastMode(model: FastModeModel | undefined): boolean {
-	return model?.provider === "openai-codex" &&
-		model.api === "openai-codex-responses" &&
-		FAST_MODE_MODEL_IDS.has(model.id);
+	if (!model || !FAST_MODE_MODEL_IDS.has(model.id)) return false;
+	return (model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
+		(model.provider === "openai" && (model.api === "openai-responses" || model.api === "openai-completions"));
 }
 
 export function restoreFastMode(entries: readonly unknown[]): boolean {
@@ -64,7 +64,7 @@ export function restoreFastMode(entries: readonly unknown[]): boolean {
 		};
 		if (
 			candidate.type === "custom" &&
-			candidate.customType === STATE_ENTRY_TYPE &&
+			candidate.customType === FAST_MODE_STATE_ENTRY_TYPE &&
 			typeof candidate.data?.enabled === "boolean"
 		) enabled = candidate.data.enabled;
 	}
@@ -76,11 +76,12 @@ export default function codexFastMode(pi: ExtensionAPI) {
 	const websocketPatch = installWebSocketOriginatorPatch();
 
 	const updateStatus = (ctx: Pick<ExtensionContext, "model" | "ui">) => {
-		websocketPatch.enabled = enabled && supportsFastMode(ctx.model);
-		const text = enabled && supportsFastMode(ctx.model)
-			? ctx.ui.theme.fg("accent", "fast")
+		const active = enabled && supportsFastMode(ctx.model);
+		websocketPatch.enabled = active && ctx.model?.provider === "openai-codex";
+		const text = enabled
+			? ctx.ui.theme.fg(active ? "accent" : "dim", active ? "fast" : "fast (inactive)")
 			: undefined;
-		ctx.ui.setStatus(STATUS_KEY, text);
+		ctx.ui.setStatus(FAST_MODE_STATUS_KEY, text);
 	};
 
 	// Leave Pi's native provider, auth, thinking mapping, and stream hooks intact.
@@ -88,12 +89,12 @@ export default function codexFastMode(pi: ExtensionAPI) {
 	pi.on("before_provider_request", (event, ctx) => {
 		if (!enabled || !supportsFastMode(ctx.model) || !event.payload ||
 			typeof event.payload !== "object" || Array.isArray(event.payload)) return;
+		// Some OpenAI/Codex endpoints still reject the newer "fast" alias.
 		return { ...event.payload, service_tier: "priority" };
 	});
 
 	const restoreState = (ctx: ExtensionContext) => {
 		enabled = restoreFastMode(ctx.sessionManager.getBranch());
-		websocketPatch.enabled = enabled;
 		updateStatus(ctx);
 	};
 
@@ -102,11 +103,11 @@ export default function codexFastMode(pi: ExtensionAPI) {
 	pi.on("model_select", (_event, ctx) => updateStatus(ctx));
 	pi.on("session_shutdown", (_event, ctx) => {
 		websocketPatch.enabled = false;
-		ctx.ui.setStatus(STATUS_KEY, undefined);
+		ctx.ui.setStatus(FAST_MODE_STATUS_KEY, undefined);
 	});
 
 	pi.registerCommand("fast", {
-		description: "Toggle Codex Fast Mode: /fast [on|off|status]",
+		description: "Toggle OpenAI Fast Mode: /fast [on|off|status]",
 		getArgumentCompletions: (prefix) => {
 			const options = ["on", "off", "status"]
 				.filter((value) => value.startsWith(prefix.trim().toLowerCase()))
@@ -117,7 +118,7 @@ export default function codexFastMode(pi: ExtensionAPI) {
 			const action = args.trim().toLowerCase();
 			if (action === "status") {
 				const applicability = supportsFastMode(ctx.model) ? "supported model" : "unsupported model";
-				ctx.ui.notify(`Codex Fast Mode is ${enabled ? "on" : "off"} (${applicability}).`, "info");
+				ctx.ui.notify(`Fast Mode is ${enabled ? "on" : "off"} (${applicability}).`, "info");
 				return;
 			}
 			if (action !== "" && action !== "on" && action !== "off") {
@@ -126,10 +127,9 @@ export default function codexFastMode(pi: ExtensionAPI) {
 			}
 
 			enabled = action === "on" || (action === "" && !enabled);
-			websocketPatch.enabled = enabled;
-			pi.appendEntry(STATE_ENTRY_TYPE, { enabled });
+			pi.appendEntry(FAST_MODE_STATE_ENTRY_TYPE, { enabled });
 			updateStatus(ctx);
-			ctx.ui.notify(`Codex Fast Mode ${enabled ? "enabled" : "disabled"}.`, enabled ? "warning" : "info");
+			ctx.ui.notify(`Fast Mode ${enabled ? "enabled" : "disabled"}.`, enabled ? "warning" : "info");
 		},
 	});
 }

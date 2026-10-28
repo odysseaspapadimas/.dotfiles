@@ -21,6 +21,7 @@ import { Action, SessionOutput, type ActionName, type SessionResultDetails } fro
 import { SessionMailbox, sendMailbox, mailboxStatus, mailboxPending, messageMarker,
   type MailboxIdentity, type DeliveryReceipt } from "./pi-sessions/mailbox.ts";
 import { basename, dirname, join, resolve } from "node:path";
+import { FAST_MODE_STATE_ENTRY_TYPE } from "./codex-fast-mode/index.ts";
 
 const TOOL_NAME = "pi_sessions";
 
@@ -110,6 +111,7 @@ interface ToolParams {
   lifecycle?: "persistent" | "task";
   model?: string;
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  fast?: boolean;
   createdAfter?: string;
   updatedAfter?: string;
   query?: string;
@@ -895,6 +897,9 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       parentSessionId: parentHeader?.id,
       delegationDepth: Math.max(0, parentMetadata?.delegationDepth ?? 0) + 1,
     } satisfies OrchestratorMetadata);
+    if (params.fast !== undefined) {
+      manager.appendCustomEntry(FAST_MODE_STATE_ENTRY_TYPE, { enabled: params.fast });
+    }
     const sessionPath = manager.getSessionFile();
     const header = manager.getHeader();
     if (!sessionPath || !header) throw new Error("Pi did not create a persistent session file");
@@ -976,6 +981,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       lifecycle: Type.Optional(SessionLifecycle),
       model: Type.Optional(Type.String({ description: "Model for create in provider/model format; inherits the current model when omitted" })),
       thinking: Type.Optional(ThinkingLevel),
+      fast: Type.Optional(Type.Boolean({ description: "Enable Fast Mode for create; defaults to off, not inherited from the parent. Applies to supported OpenAI models." })),
       timeoutSeconds: Type.Optional(
         Type.Integer({ minimum: 1, maximum: 3600, description: "Watch timeout; default 300" }),
       ),
@@ -1025,7 +1031,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const runtime = await oneRuntime(session, signal);
           startMonitor(session);
           return toolResult(
-            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent and accepted.`,
+            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nFast Mode: ${params.fast ? "on" : "off"}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent and accepted.`,
             { session, runtime, startingMessageAccepted: true },
           );
         }
