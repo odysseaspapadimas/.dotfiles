@@ -1,4 +1,5 @@
 import QtQuick
+import qs.Commons as OmarchyColors
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -18,7 +19,7 @@ Panel {
   property string lastError: ""
   property int selectedAction: 0
   property bool cursorActive: false
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : OmarchyColors.Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -183,7 +184,7 @@ Panel {
         visible: root.lastError !== ""
         width: parent.width
         text: root.lastError
-        color: root.bar ? root.bar.urgent : Color.urgent
+        color: root.bar ? root.bar.urgent : OmarchyColors.Color.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.WordWrap

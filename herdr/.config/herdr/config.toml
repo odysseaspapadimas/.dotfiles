@@ -3,6 +3,7 @@ onboarding = false
 [theme]
 name = "catppuccin"
 
+auto_switch = false
 [theme.custom]
 # Catppuccin Macchiato-inspired overrides.
 panel_bg = "#24273a"

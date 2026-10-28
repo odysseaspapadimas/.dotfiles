@@ -1,4 +1,5 @@
 import QtQuick
+import qs.Commons as OmarchyColors
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -16,7 +17,7 @@ Panel {
   property bool ready: false
   readonly property real cpu: usage.length ? usage[0] : 0
   readonly property real ram: memory.MemTotal ? 100 * (1 - memory.MemAvailable / memory.MemTotal) : 0
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : OmarchyColors.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -162,7 +163,7 @@ Panel {
         width: parent.width * Math.max(0, Math.min(100, value)) / 100
         height: parent.height
         radius: parent.radius
-        color: Color.accent
+        color: OmarchyColors.Color.accent
         Behavior on width { NumberAnimation { duration: 250 } }
       }
     }

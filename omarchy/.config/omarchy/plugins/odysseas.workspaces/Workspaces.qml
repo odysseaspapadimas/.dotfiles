@@ -1,4 +1,5 @@
 import QtQuick
+import qs.Commons as OmarchyColors
 import QtQuick.Layouts
 import Quickshell.Hyprland
 import qs.Commons
@@ -65,7 +66,7 @@ BarWidget {
           anchors.fill: parent
           anchors.margins: Style.spaceReal(1)
           radius: Math.max(0, Style.cornerRadius)
-          color: parent.focused ? Util.alpha(Color.accent, 0.10) : "transparent"
+          color: parent.focused ? Util.alpha(OmarchyColors.Color.accent, 0.10) : "transparent"
 
           Behavior on color { ColorAnimation { duration: 160 } }
         }
@@ -76,7 +77,7 @@ BarWidget {
           anchors.bottom: parent.bottom
           width: parent.width - Style.spaceReal(4)
           height: Style.spaceReal(1)
-          color: Color.accent
+          color: OmarchyColors.Color.accent
         }
 
         WidgetButton {
@@ -84,7 +85,7 @@ BarWidget {
           anchors.fill: parent
           bar: root.bar
           text: parent.focused ? "\uDB85\uDCFB" : (parent.modelData === 10 ? "0" : String(parent.modelData))
-          foreground: parent.focused ? Color.accent : (root.bar ? root.bar.barForeground : Color.foreground)
+          foreground: parent.focused ? OmarchyColors.Color.accent : (root.bar ? root.bar.barForeground : OmarchyColors.Color.foreground)
           opacity: parent.occupied || parent.focused ? 1 : 0.5
           horizontalMargin: 6
           verticalPadding: 6
