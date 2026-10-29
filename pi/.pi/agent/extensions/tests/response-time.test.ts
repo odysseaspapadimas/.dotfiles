@@ -1,124 +1,183 @@
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import activityProfiler, {
-	boundTurns,
-	formatDuration,
-	sanitizeArgumentPreview,
-	type ActivityTurn,
-} from "../response-time.ts";
+import responseTime, { formatDuration, formatSummary } from "../response-time.ts";
 
-assert.equal(formatDuration(999), "999ms");
-assert.equal(formatDuration(1_250), "1.3s");
-assert.equal(formatDuration(61_000), "1m 1s");
-
-const secretPreview = sanitizeArgumentPreview({
-	command: "curl -H 'Authorization: Bearer top-secret' 'https://example.test/?token=also-secret' --password hunter2",
-});
-assert.match(secretPreview, /^command=/);
-assert.doesNotMatch(secretPreview, /top-secret|also-secret|hunter2/);
-assert.match(secretPreview, /\[REDACTED\]/);
-assert.equal(sanitizeArgumentPreview({ path: "/tmp/example.ts", content: "must not be stored" }), "path=/tmp/example.ts");
-assert.equal(sanitizeArgumentPreview({ content: "full payload" }), "");
-
-const makeTurn = (index: number, eventCount = 1): ActivityTurn => ({
-	version: 1,
-	id: `turn-${index}`,
-	model: "test-model",
-	startedAt: index,
-	durationMs: 10,
-	toolCount: eventCount,
-	toolTimeMs: eventCount,
-	failureCount: 0,
-	droppedEvents: 0,
-	events: Array.from({ length: eventCount }, (_, eventIndex) => ({
-		toolCallId: `${index}-${eventIndex}`,
-		toolName: "read",
-		preview: "path=/tmp/test",
-		startedAt: index,
-		offsetMs: 0,
-		durationMs: 1,
-		failed: false,
-	})),
-});
-assert.equal(boundTurns(Array.from({ length: 50 }, (_, index) => makeTurn(index))).length, 40);
-assert.equal(boundTurns([makeTurn(1, 250), makeTurn(2, 250), makeTurn(3, 250)]).length, 1);
-
-const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
-const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-const appended: Array<{ customType: string; data: ActivityTurn }> = [];
-const fakePi = {
-	on(name: string, handler: (event: any, ctx: any) => unknown) {
-		const list = handlers.get(name) ?? [];
-		list.push(handler);
-		handlers.set(name, list);
-	},
-	registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {
-		commands.set(name, command);
-	},
-	appendEntry(customType: string, data: ActivityTurn) {
-		appended.push({ customType, data });
-	},
-};
-activityProfiler(fakePi as unknown as ExtensionAPI);
-
-const notifications: Array<{ message: string; type: string }> = [];
-let branch: any[] = [];
-const ctx = {
-	model: { id: "mock-model" },
-	hasUI: true,
-	mode: "tui",
-	sessionManager: { getBranch: () => branch },
-	ui: {
-		notify: (message: string, type: string) => notifications.push({ message, type }),
-		custom: async (factory: any) => {
-			const theme = {
-				fg: (_color: string, text: string) => text,
-				bold: (text: string) => text,
-			};
-			const component = factory({ terminal: { rows: 30 }, requestRender() {} }, theme, {}, () => {});
-			const lines = component.render(100) as string[];
-			assert.ok(lines.every((line) => line.length <= 100));
-			return undefined;
+function harness() {
+	const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+	const notifications: Array<{ message: string; type: string }> = [];
+	responseTime({
+		on(name: string, handler: (event: any, ctx: any) => unknown) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
 		},
-	},
-};
-
-const emit = async (name: string, event: any = {}) => {
-	for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
-};
-
-const realNow = Date.now;
-let now = 1_000;
-Date.now = () => now;
-try {
-	await emit("session_start");
-	await emit("agent_start");
-	await emit("tool_execution_start", { toolCallId: "a", toolName: "bash", args: { command: "echo ok" } });
-	now = 1_010;
-	await emit("tool_execution_start", { toolCallId: "b", toolName: "read", args: { path: "/tmp/file" } });
-	now = 1_050;
-	await emit("tool_execution_end", { toolCallId: "b", toolName: "read", isError: true });
-	now = 1_100;
-	await emit("tool_execution_end", { toolCallId: "a", toolName: "bash", isError: false });
-	now = 1_150;
-	await emit("agent_end");
-} finally {
-	Date.now = realNow;
+		registerCommand() { assert.fail("summary-only tracking must not register commands"); },
+		appendEntry() { assert.fail("summary-only tracking must not persist history"); },
+	} as unknown as ExtensionAPI);
+	const ctx = {
+		model: { id: "mock-model" } as { id?: string; name?: string } | undefined,
+		hasUI: true,
+		sessionManager: { getBranch() { assert.fail("summary-only tracking must not read session history"); } },
+		ui: {
+			notify: (message: string, type: string) => notifications.push({ message, type }),
+			custom() { assert.fail("summary-only tracking must not open an overlay"); },
+		},
+	};
+	const emit = async (name: string, event: any = {}) => {
+		for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+	};
+	return { emit, ctx, notifications };
 }
 
-assert.equal(appended.length, 1);
-const recorded = appended[0]!.data;
-assert.equal(recorded.toolCount, 2);
-assert.equal(recorded.toolTimeMs, 140);
-assert.equal(recorded.failureCount, 1);
-assert.deepEqual(recorded.events.map((event) => event.toolCallId), ["a", "b"]);
-assert.deepEqual(recorded.events.map((event) => event.durationMs), [100, 40]);
-assert.equal(notifications[0]!.type, "warning");
-assert.match(notifications[0]!.message, /mock-model • 150ms • 2 tools • 140ms tool time • 1 failed/);
+test("response durations and the existing summary format are preserved", () => {
+	for (const [ms, expected] of [
+		[0, "0ms"], [999, "999ms"], [1_250, "1.3s"], [10_000, "10s"],
+		[61_000, "1m 1s"], [3_661_000, "1h 1m"], [-1, "0ms"], [NaN, "0ms"], [Infinity, "0ms"],
+	] as const) assert.equal(formatDuration(ms), expected);
+	assert.equal(formatSummary({ model: "mock-model", durationMs: 150, toolCount: 2, toolTimeMs: 140, failureCount: 1 }),
+		"mock-model • 150ms • 2 tools • 140ms tool time • 1 failed");
+});
 
-// Reload/tree reconstruction must use only profiler entries on the active branch.
-branch = [{ type: "custom", customType: "turn-activity-v1", data: makeTurn(99) }];
-await emit("session_tree");
-await commands.get("activity")!.handler("", ctx);
+test("parallel tools retain summed tool time and failures without reading arguments", async (t) => {
+	let now = 1_000;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("session_start");
+	await emit("agent_start");
+	await emit("tool_execution_start", {
+		toolCallId: "a",
+		get args() { return assert.fail("tool arguments must not be inspected or retained"); },
+	});
+	now = 1_010;
+	await emit("tool_execution_start", { toolCallId: "b" });
+	now = 1_050;
+	await emit("tool_execution_end", { toolCallId: "b", isError: true });
+	now = 1_100;
+	await emit("tool_execution_end", { toolCallId: "a", isError: false });
+	// Duplicate and unmatched completion events must not inflate the totals.
+	await emit("tool_execution_end", { toolCallId: "a", isError: true });
+	await emit("tool_execution_end", { toolCallId: "unknown", isError: true });
+	now = 1_150;
+	await emit("agent_end");
+	assert.deepEqual(notifications, [{
+		message: "mock-model • 150ms • 2 tools • 140ms tool time • 1 failed", type: "warning",
+	}]);
+});
 
-console.log("response-time activity profiler tests: ok");
+test("unfinished tools are counted as failed once when a run ends", async (t) => {
+	let now = 1_000;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("agent_start");
+	await emit("tool_execution_start", { toolCallId: "aborted" });
+	now = 1_100;
+	await emit("agent_end");
+	await emit("tool_execution_end", { toolCallId: "aborted", isError: true });
+	await emit("agent_end");
+	assert.deepEqual(notifications, [{
+		message: "mock-model • 100ms • 1 tools • 100ms tool time • 1 failed", type: "warning",
+	}]);
+});
+
+test("each run starts fresh and runs without tools still produce a summary", async (t) => {
+	let now = 1_000;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("agent_start");
+	await emit("tool_execution_start", { toolCallId: "a" });
+	now = 1_010;
+	await emit("tool_execution_end", { toolCallId: "a", isError: true });
+	await emit("agent_end");
+	now = 2_000;
+	await emit("agent_start");
+	now = 2_150;
+	await emit("agent_end");
+	assert.deepEqual(notifications[1], {
+		message: "mock-model • 150ms • 0 tools • 0ms tool time • 0 failed", type: "info",
+	});
+});
+
+test("tools can start tracking without agent_start, including timestamp zero", async (t) => {
+	let now = 0;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("tool_execution_start", { toolCallId: "a" });
+	now = 10;
+	await emit("tool_execution_end", { toolCallId: "a", isError: false });
+	await emit("agent_end");
+	assert.deepEqual(notifications, [{
+		message: "mock-model • 10ms • 1 tools • 10ms tool time • 0 failed", type: "info",
+	}]);
+});
+
+for (const event of ["session_start", "session_tree", "session_shutdown"]) {
+	test(`${event} drops pending state without reading or writing history`, async (t) => {
+		t.mock.method(Date, "now", () => 1_000);
+		const { emit, notifications } = harness();
+		await emit("agent_start");
+		await emit("tool_execution_start", { toolCallId: "old" });
+		await emit(event);
+		await emit("tool_execution_end", { toolCallId: "old", isError: true });
+		await emit("agent_end");
+		assert.deepEqual(notifications, []);
+		await emit("agent_start");
+		await emit("agent_end");
+		assert.deepEqual(notifications, [{
+			message: "mock-model • 0ms • 0 tools • 0ms tool time • 0 failed", type: "info",
+		}]);
+	});
+}
+
+test("headless runs neither notify nor persist summaries", async () => {
+	const { emit, ctx, notifications } = harness();
+	ctx.hasUI = false;
+	await emit("agent_start");
+	await emit("tool_execution_start", { toolCallId: "a" });
+	await emit("tool_execution_end", { toolCallId: "a", isError: false });
+	await emit("agent_end");
+	assert.deepEqual(notifications, []);
+});
+
+test("tool counts are not capped by the removed timeline limits", async (t) => {
+	let now = 1_000;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("agent_start");
+	for (let i = 0; i < 250; i++) {
+		await emit("tool_execution_start", { toolCallId: String(i) });
+		now++;
+		await emit("tool_execution_end", { toolCallId: String(i), isError: false });
+	}
+	await emit("agent_end");
+	assert.deepEqual(notifications, [{
+		message: "mock-model • 250ms • 250 tools • 250ms tool time • 0 failed", type: "info",
+	}]);
+});
+
+test("backward clock changes never produce negative durations", async (t) => {
+	let now = 1_000;
+	t.mock.method(Date, "now", () => now);
+	const { emit, notifications } = harness();
+	await emit("agent_start");
+	await emit("tool_execution_start", { toolCallId: "a" });
+	now = 900;
+	await emit("tool_execution_end", { toolCallId: "a", isError: false });
+	await emit("agent_end");
+	assert.deepEqual(notifications, [{
+		message: "mock-model • 0ms • 1 tools • 0ms tool time • 0 failed", type: "info",
+	}]);
+});
+
+test("model naming falls back to the display name and then unknown", async (t) => {
+	t.mock.method(Date, "now", () => 1_000);
+	const { emit, ctx, notifications } = harness();
+	ctx.model = { name: "Model Display Name" };
+	await emit("agent_start");
+	await emit("agent_end");
+	ctx.model = undefined;
+	await emit("agent_start");
+	await emit("agent_end");
+	assert.match(notifications[0].message, /^Model Display Name •/);
+	assert.match(notifications[1].message, /^unknown •/);
+});

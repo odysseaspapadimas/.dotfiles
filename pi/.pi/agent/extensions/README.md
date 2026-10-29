@@ -17,6 +17,18 @@ text(page.sessions.map(({ id, name, status }) => ({ id, name, status })));
 
 Delivery acceptance is not completion: retain the returned `messageId` and use it with status/watch. Only an `outcome` reports a settled observed run; queued delivery must not inherit the previous run’s outcome. Existing renderer details and readable output remain available, and failures still reject rather than returning apparent success.
 
+## Response-time summary
+
+`response-time.ts` shows the model, elapsed run time, tool-call count, summed tool
+execution time, and failure count after each agent run. Overlapping tool durations
+are summed, so tool time can exceed elapsed time. Tools still pending when a run
+ends are counted as failed, preserving aborted-run reporting.
+
+Only counters and start timestamps for in-flight tools are retained. There is no
+`/activity` command, argument capture, history persistence, or history replay.
+Existing `turn-activity-v1` entries in older sessions are left untouched and ignored
+by this extension.
+
 ## Compatibility checks
 
 Run against the **currently installed Pi**, including its host-provided modules:
@@ -29,7 +41,7 @@ npm run typecheck
 
 The test/typecheck tooling uses the existing development dependencies in `changed-files-ledger/node_modules`. If they are missing, run `npm --prefix changed-files-ledger ci` first. Override host discovery with `PI_TEST_HOST=/path/to/pi-coding-agent` if `pi` is not on `PATH`.
 
-The suite covers the ledger, session/mailbox orchestration, quota history, activity tracking, Fast Mode, session-naming cancellation, side-chat native checkpoints, and narrow-terminal UI rendering. It also loads every configured local/npm extension using Pi's real loader and runs SDK lifecycle/command checks. That installed-extension check defaults to `~/.pi/agent`; override with `PI_TEST_AGENT_DIR`.
+The suite covers the ledger, session/mailbox orchestration, quota history, response-time summaries, Fast Mode, session-naming cancellation, side-chat native checkpoints, and narrow-terminal UI rendering. It also loads every configured local/npm extension using Pi's real loader and runs SDK lifecycle/command checks. That installed-extension check defaults to `~/.pi/agent`; override with `PI_TEST_AGENT_DIR`.
 
 The installed-extension suite isolates session storage, disables Herdr integration, stubs network requests, and does not prompt a model. It does not verify paid provider calls, real side-pane creation, or every third-party tool interaction.
 

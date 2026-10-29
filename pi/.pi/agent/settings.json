@@ -24,13 +24,12 @@
     "npm:pi-token-speed",
     "npm:@juicesharp/rpiv-ask-user-question",
     "npm:pi-web-access",
-    "npm:pi-context-usage",
-    "npm:@juicesharp/rpiv-todo"
+    "npm:pi-context-usage"
   ],
   "extensions": [
     "-extensions/herdr-agent-state.ts"
   ],
-  "quietStartup": false,
+  "quietStartup": true,
   "steeringMode": "one-at-a-time",
   "doubleEscapeAction": "tree",
   "terminal": {

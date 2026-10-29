@@ -1,6 +1,6 @@
 # Pi changed-files ledger
 
-Standalone Pi extension for per-turn and whole-session file-change review in Hunk. It supports either one Git worktree or a bounded group of independent immediate-child Git repositories as one logical workspace. It does not import, emit events to, or share state with the activity profiler.
+Standalone Pi extension for per-turn and whole-session file-change review in Hunk. It supports either one Git worktree or a bounded group of independent immediate-child Git repositories as one logical workspace. It does not import, emit events to, or share state with the response-time summary extension.
 
 ## Setup
 
