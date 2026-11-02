@@ -228,6 +228,8 @@ export function sideStatusLabel(localCount: number, handedOffLocalCount: number)
 }
 
 export default function herdrSideChat(pi: ExtensionAPI) {
+  // This adapter belongs to the old TUI, not to a new-core Pi on the same host.
+  if (process.env.HC_TERMINAL_ID && process.env.HERDR_ENV !== "1") return;
   let inheritedMessages: ReturnType<typeof buildSessionContext>["messages"] = [];
   let inheritedNativeCheckpoint = false;
   let sidePaneId: string | undefined;

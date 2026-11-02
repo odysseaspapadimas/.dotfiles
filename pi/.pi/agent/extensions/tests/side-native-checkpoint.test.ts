@@ -17,6 +17,8 @@ test("native side-chat checkpoints seed only the independent in-memory session",
   process.env.PI_HERDR_SIDE_SOURCE = path;
   delete process.env.PI_HERDR_SIDE_SOURCE_LEAF;
   delete process.env.HERDR_ENV;
+  delete process.env.HC_TERMINAL_ID;
+  delete process.env.HC_TERMINAL_SOCKET;
   const { default: sideChat } = await import("../herdr-side-chat.ts");
   try {
     const sideSession = SessionManager.inMemory(root);

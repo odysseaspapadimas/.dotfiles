@@ -9,6 +9,10 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, TextContent } from "@earendil-works/pi-ai";
+import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { coreRequest, sessionBackend, type CoreTerminal } from "./pi-sessions/core.ts";
 
 export default function (pi: ExtensionAPI) {
 	// A side chat is a split pane inside its source tab. It must not rename the
@@ -26,9 +30,20 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function setHerdrTabName(name: string, ctx: ExtensionContext): Promise<void> {
-		const tabId = process.env.HERDR_TAB_ID;
-		if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !tabId) return;
-		const result = await pi.exec("herdr", ["tab", "rename", tabId, name], { timeout: 5_000 });
+		if (ctx.mode !== "tui") return;
+		let result;
+		if (sessionBackend(process.env) === "core") {
+			const terminal = await coreRequest<CoreTerminal>(process.env.HC_TERMINAL_SOCKET!, "terminal.get", { terminal: process.env.HC_TERMINAL_ID });
+			const tab = terminal.labels["herdr.tab"];
+			if (!tab) return;
+			const bridge = join(homedir(), ".local/bin/herdr-ui");
+			result = await pi.exec(existsSync(bridge) ? bridge : "herdr-app",
+				["do", "tab.rename", JSON.stringify({ id: tab, name })], { timeout: 90_000 });
+		} else {
+			const tabId = process.env.HERDR_TAB_ID;
+			if (process.env.HERDR_ENV !== "1" || !tabId) return;
+			result = await pi.exec("herdr", ["tab", "rename", tabId, name], { timeout: 5_000 });
+		}
 		if (result.code !== 0) {
 			throw new Error(result.stderr.trim() || result.stdout.trim() || "Herdr tab rename failed");
 		}

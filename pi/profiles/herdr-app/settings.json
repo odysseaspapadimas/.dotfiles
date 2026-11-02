@@ -1,0 +1,24 @@
+{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-6.1-sol",
+  "defaultThinkingLevel": "xhigh",
+  "defaultTools": [
+    "+codemode"
+  ],
+  "theme": "catppuccin-mocha",
+  "defaultProjectTrust": "never",
+  "tuiMode": "fullscreen",
+  "fullscreenScrollbar": "auto",
+  "fullscreenCopyOnSelect": true,
+  "compaction": {
+    "enabled": true
+  },
+  "quietStartup": false,
+  "steeringMode": "one-at-a-time",
+  "doubleEscapeAction": "tree",
+  "terminal": {
+    "showImages": true,
+    "showTerminalProgress": true
+  },
+  "enableInstallTelemetry": false
+}

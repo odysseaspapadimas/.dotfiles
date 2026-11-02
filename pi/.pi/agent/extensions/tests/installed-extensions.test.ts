@@ -18,7 +18,7 @@ test("all configured extensions load and complete the installed Pi lifecycle", a
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
   process.env.PI_OFFLINE = "1";
   for (const key of Object.keys(process.env)) {
-    if (key.startsWith("HERDR_") || key.startsWith("PI_HERDR_SIDE")) delete process.env[key];
+    if (key.startsWith("HERDR_") || key.startsWith("HC_") || key.startsWith("PI_HERDR_SIDE")) delete process.env[key];
   }
   initTheme("dark", false);
   const originalFetch = globalThis.fetch;
@@ -45,8 +45,8 @@ test("all configured extensions load and complete the installed Pi lifecycle", a
     for (const name of ["fast", "context", "skills", "side", "view", "codex-review", "diff", "checkpoints"]) assert.ok(runner.getCommand(name), name);
     assert.equal(runner.getCommand("activity"), undefined, "response timing should be summary-only");
     for (const name of ["pi_sessions", "ask_user_question", "web_enable"]) assert.ok(runner.getToolDefinition(name), name);
-    assert.equal(runner.getToolDefinition("todo"), undefined, "todo tracking should not be loaded");
-    assert.equal(runner.getCommand("todos"), undefined, "the todo panel command should not be loaded");
+    // Optional packages such as todo are machine-local preferences, not a
+    // portability contract. This probe must work whether they are enabled or not.
 
     const sessionsTool = runner.getToolDefinition("pi_sessions")!;
     assert.ok(sessionsTool.outputSchema);

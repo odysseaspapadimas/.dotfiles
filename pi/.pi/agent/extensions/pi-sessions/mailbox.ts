@@ -16,7 +16,8 @@ export interface DeliveryReceipt {
   error?: string;
 }
 interface Request extends MailboxIdentity {
-  action: "hello" | "send" | "report" | "status" | "pending";
+  action: "hello" | "send" | "report" | "status" | "pending" | "rename";
+  name?: string;
   messageId?: string;
   message?: string;
 }
@@ -24,6 +25,7 @@ interface Response {
   runtimeId?: string;
   delivery?: DeliveryReceipt;
   pending?: boolean;
+  renamed?: string;
   error?: string;
 }
 interface Record {
@@ -36,6 +38,7 @@ interface Receiver {
   isCurrent(): boolean;
   isIdle(): boolean;
   hasPendingMessages(): boolean;
+  rename?(name: string): void;
   deliver(content: string, action: "send" | "report"): void;
   findAccepted(messageId: string): { entryId: string; content: string; action: "send" | "report" } | undefined;
   onError(error: unknown): void;
@@ -169,6 +172,18 @@ export class SessionMailbox {
       return { error: "Mailbox target changed; refusing cross-session delivery" };
     }
     if (request.action === "hello") return { runtimeId: this.runtimeId };
+    if (request.action === "rename") {
+      const name = request.name?.trim();
+      if (!name || /[\r\n]/u.test(name) || Buffer.byteLength(name) > 4096) return { error: "Session name must be a single line of 1–4096 bytes" };
+      this.refresh();
+      if (!this.receiver.isIdle() || this.receiver.hasPendingMessages() ||
+        [...this.records.values()].some((record) => ["queued", "unknown"].includes(record.receipt.state))) {
+        return { error: "Cannot rename while the target is busy or has pending messages" };
+      }
+      if (!this.receiver.rename) return { error: "Reload the TARGET session to enable draft-safe renaming" };
+      this.receiver.rename(name);
+      return { renamed: name };
+    }
     if (request.action === "pending") {
       this.refresh();
       return { pending: [...this.records.values()].some((record) => ["queued", "unknown"].includes(record.receipt.state)) };
@@ -297,6 +312,12 @@ export async function sendMailbox(root: string, identity: MailboxIdentity, messa
       ? "Delivery is unconfirmed. Check status with this messageId, or retry the SAME action, messageId and message; do not blindly resend with a new ID."
       : "No message was submitted. Reload the TARGET session to enable its mailbox, then retry. Terminal input fallback is disabled."}`);
   }
+}
+
+/** Rename in the owning Pi process, without typing /name over a user's draft. */
+export async function renameMailbox(root: string, identity: MailboxIdentity, name: string, signal?: AbortSignal): Promise<void> {
+  const response = await request(root, identity, { action: "rename", name }, signal);
+  if (response.renamed !== name) throw new Error("Pi did not acknowledge the session rename; inspect its name before retrying");
 }
 
 export async function mailboxStatus(root: string, identity: MailboxIdentity, messageId: string, signal?: AbortSignal): Promise<DeliveryReceipt> {

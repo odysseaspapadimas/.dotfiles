@@ -1,2 +1,4 @@
 # Shared template only; preserve each machine's Pi identity, packages and state.
 ^/\.pi/agent/settings\.json$
+# Opt-in profile sources have their own installer; never stow them as ~/profiles.
+^/profiles($|/)

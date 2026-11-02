@@ -9,6 +9,8 @@ import {
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { stripVTControlCharacters } from "node:util";
+import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { SessionStore, METADATA_TYPE, SETTLED_TYPE, REPORT_TYPE, metadataFor, canonicalPath,
@@ -18,7 +20,8 @@ import { recall, conversationPage, excerpt } from "./pi-sessions/recall.ts";
 import { runState, waitWithSignal } from "./pi-sessions/runs.ts";
 import { registerSubagentUI, workerRow } from "./pi-sessions/ui.ts";
 import { Action, SessionOutput, type ActionName, type SessionResultDetails } from "./pi-sessions/output.ts";
-import { SessionMailbox, sendMailbox, mailboxStatus, mailboxPending, messageMarker,
+import { CoreSessions, sessionBackend } from "./pi-sessions/core.ts";
+import { SessionMailbox, sendMailbox, renameMailbox, mailboxStatus, mailboxPending, messageMarker,
   type MailboxIdentity, type DeliveryReceipt } from "./pi-sessions/mailbox.ts";
 import { basename, dirname, join, resolve } from "node:path";
 import { FAST_MODE_STATE_ENTRY_TYPE } from "./codex-fast-mode/index.ts";
@@ -74,7 +77,7 @@ interface HerdrAgentSession {
 interface HerdrPane {
   pane_id: string;
   agent?: string;
-  agent_status?: "idle" | "working" | "blocked" | "done" | "unknown";
+  agent_status?: "idle" | "working" | "blocked" | "done" | "error" | "unknown";
   workspace_id?: string;
   tab_id?: string;
   agent_session?: HerdrAgentSession | null;
@@ -212,6 +215,20 @@ function sessionArgument(processInfo: HerdrProcessInfo | undefined): string | un
 }
 
 export default function piSessionOrchestrator(pi: ExtensionAPI) {
+  const backend = sessionBackend(process.env);
+  const appBridge = join(homedir(), ".local/bin/herdr-ui");
+  const appExec = (args: string[], signal?: AbortSignal) => pi.exec(existsSync(appBridge) ? appBridge : "herdr-app", args, { timeout: 90_000, signal });
+  const core = backend === "core" ? new CoreSessions(process.env.HC_TERMINAL_SOCKET!, process.env.HC_TERMINAL_ID!, appExec) : undefined;
+  const defaultCoreSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`, "herdr-core/default.sock");
+  // The normal Debina store spans both managers. Private/test agent directories
+  // remain isolated and must never probe the person's real runtime servers.
+  const sharedRuntimes = resolve(AGENT_DIR) === resolve(homedir(), ".pi/agent") &&
+    (!core || resolve(core.socketPath) === resolve(defaultCoreSocket));
+  const visibleCore = core ?? (sharedRuntimes && existsSync(defaultCoreSocket)
+    ? new CoreSessions(defaultCoreSocket, "", appExec) : undefined);
+  const oldSocket = process.env.HERDR_SOCKET_PATH || join(homedir(), ".config/herdr/herdr.sock");
+  const useOldRuntime = backend === "tui" || sharedRuntimes && existsSync(oldSocket);
+  const isCorePane = (pane: Pick<HerdrPane, "pane_id">) => /^t[0-9a-z]+$/u.test(pane.pane_id);
   let migrationPromise: Promise<void> | undefined;
   let currentSessionPath: string | undefined;
   const store = new SessionStore(SESSION_ROOT);
@@ -259,8 +276,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
         runtime = (await launchSession(session, signal)).runtime;
       }
       if (!runtime) throw new Error("This worker is stopped. Press r to reopen its saved session without prompting.");
-      if (!runtime.tab_id) throw new Error("Session has no Herdr tab");
-      await herdr(["tab", "focus", runtime.tab_id], signal);
+      await focusRuntime(runtime, signal);
     }),
   });
 
@@ -273,15 +289,20 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     currentSessionPath = sourceFile ? await canonicalPath(sourceFile) : undefined;
     if (shutdown.signal.aborted) shutdown = new AbortController();
     await subagentUI.start(ctx);
-    const paneId = process.env.HERDR_PANE_ID;
+    const paneId = core?.terminalId ?? process.env.HERDR_PANE_ID;
     const header = ctx.sessionManager.getHeader();
-    if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !paneId || !currentSessionPath || !sourceFile || !header) return;
+    if (ctx.mode !== "tui" || backend === "none" || !paneId || !currentSessionPath || !sourceFile || !header) return;
+    if (core) {
+      try { await core.register(header.id, currentSessionPath, shutdown.signal); }
+      catch (error) { ctx.ui.notify(`Pi session core registration failed: ${String(error)}`, "warning"); }
+    }
     const identity: MailboxIdentity = { sessionId: header.id, sessionPath: currentSessionPath, paneId };
     mailbox = new SessionMailbox(MAILBOX_ROOT, identity, {
       isCurrent: () => !shutdown.signal.aborted && ctx.sessionManager.getHeader()?.id === identity.sessionId &&
         resolve(ctx.sessionManager.getSessionFile() ?? "") === resolve(sourceFile),
       isIdle: () => ctx.isIdle(),
       hasPendingMessages: () => ctx.hasPendingMessages(),
+      rename: (name) => pi.setSessionName(name),
       deliver: (content, action) => {
         if (action === "report") {
           pi.sendMessage({ customType: REPORT_TYPE, content, display: true }, { triggerTurn: false });
@@ -322,6 +343,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     shutdown.abort();
     await mailbox?.close();
     mailbox = undefined;
+    if (core && currentSessionPath) await core.unregister(currentSessionPath).catch(() => {});
     store.clear();
     observations.clear();
     completedRuns.clear();
@@ -354,6 +376,23 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     event.systemPromptOptions.sections.session_orchestration =
       `Orchestration: this session owns its assigned task (delegation depth ${depth}); work primarily here, and delegate only clearly separable subtasks—not the whole assignment.`;
   });
+
+  function runtimeLocation(runtime: HerdrPane): string {
+    return isCorePane(runtime) ? `core terminal ${runtime.pane_id}` : `Herdr tab ${runtime.tab_id}`;
+  }
+
+  async function focusRuntime(runtime: HerdrPane, signal?: AbortSignal): Promise<void> {
+    if (isCorePane(runtime)) {
+      if (!visibleCore) throw new Error("The session's core is unavailable; refusing to launch a duplicate");
+      return visibleCore.focus(runtime, signal);
+    }
+    if (!runtime.tab_id) throw new Error("Session has no Herdr tab");
+    await herdr(["tab", "focus", runtime.tab_id], signal);
+    if (core) {
+      const view = await appExec(["legacy"], signal);
+      if (view.code !== 0) throw new Error(`Old Herdr tab was selected, but its app view could not be focused: ${view.stderr || view.stdout}`);
+    }
+  }
 
   async function herdr(args: string[], signal?: AbortSignal): Promise<HerdrResponse> {
     const result = await pi.exec("herdr", args, { timeout: 30_000, signal });
@@ -462,7 +501,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     // Disk-only reads never depend on Herdr unless the caller supplied a pane reference.
     const sessions = await discoverSessions(signal);
     const runtimeNeedle = needle === "parent" && SIDE_PARENT_PANE ? SIDE_PARENT_PANE : needle;
-    if (runtimeNeedle.includes(":")) {
+    if (runtimeNeedle.includes(":") || core && /^t[0-9a-z]+$/u.test(runtimeNeedle)) {
       const runtimeIndex = await discoverRuntimes(signal);
       const paneMatches: ManagedSession[] = [];
       for (const session of sessions) {
@@ -491,10 +530,10 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
 
   async function discoverRuntimes(signal?: AbortSignal): Promise<RuntimeIndex> {
     const index: RuntimeIndex = { panes: [], byPath: new Map(), bySessionId: new Map() };
-    if (process.env.HERDR_ENV !== "1") return index;
+    if (backend === "none") return index;
 
-    const response = await herdr(["api", "snapshot"], signal);
-    const panes = response.result?.snapshot?.panes ?? [];
+    const oldResponse = useOldRuntime ? await herdr(["api", "snapshot"], signal) : undefined;
+    const panes = [...(oldResponse?.result?.snapshot?.panes ?? []), ...(visibleCore ? await visibleCore.panes(signal) : [])];
     index.panes = panes;
     for (const pane of panes) {
       const reference = pane.agent_session;
@@ -507,7 +546,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
 
     // Native Herdr session metadata is authoritative. Process arguments are a safe
     // compatibility fallback for runtimes that have not loaded Herdr's Pi integration.
-    const fallback = panes.filter((pane) => pane.agent === "pi" && !pane.agent_session);
+    const fallback = panes.filter((pane) => !isCorePane(pane) && pane.agent === "pi" && !pane.agent_session);
     for (let offset = 0; offset < fallback.length; offset += 4) {
       await Promise.all(fallback.slice(offset, offset + 4).map(async (pane) => {
         try {
@@ -582,8 +621,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     let readySince: number | undefined;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new Error("Operation aborted");
-      const response = await herdr(["pane", "get", paneId], signal);
-      const pane = response.result?.pane;
+      const pane = core ? await core.get(paneId, signal) : (await herdr(["pane", "get", paneId], signal)).result?.pane;
       const ready = pane?.agent === "pi" && (pane.agent_status === "idle" || pane.agent_status === "done");
       if (ready) {
         readySince ??= Date.now();
@@ -636,8 +674,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     signal?: AbortSignal,
     initialMessage?: string,
   ): Promise<{ session: ManagedSession; runtime: HerdrPane }> {
-    if (process.env.HERDR_ENV !== "1" || !WORKSPACE_ID) {
-      throw new Error("pi_sessions requires Pi to run inside Herdr");
+    if (backend === "none") {
+      throw new Error("pi_sessions requires Pi to run inside Herdr TUI or herdr-core");
     }
     const existing = await oneRuntime(session, signal);
     if (existing) {
@@ -648,12 +686,17 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     }
 
     const previousUserMessageIds = initialMessage ? await userMessageEntryIds(session) : undefined;
-    const response = await herdr(
+    const coreRuntime = core ? await core.launch(session, ["pi", "--session", session.sessionPath,
+      ...(session.provider ? ["--provider", session.provider] : []),
+      ...(session.model ? ["--model", session.model] : []),
+      ...(session.thinking ? ["--thinking", session.thinking] : []),
+      ...(initialMessage ? [`\n${initialMessage}`] : [])], signal) : undefined;
+    const response = core ? undefined : await herdr(
       [
         "tab",
         "create",
         "--workspace",
-        WORKSPACE_ID,
+        WORKSPACE_ID!,
         "--cwd",
         session.cwd,
         "--label",
@@ -662,15 +705,15 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       ],
       signal,
     );
-    const tabId = response.result?.tab?.tab_id;
-    const paneId = response.result?.root_pane?.pane_id;
-    if (!tabId || !paneId) throw new Error("Herdr did not return a tab and pane ID");
+    const tabId = coreRuntime?.tab_id ?? response?.result?.tab?.tab_id;
+    const paneId = coreRuntime?.pane_id ?? response?.result?.root_pane?.pane_id;
+    if (!paneId || !core && !tabId) throw new Error("Herdr did not return a runtime address");
 
     try {
       // Pi's documented interactive CLI prompt is processed only after startup and
       // resource initialization. Use it for a newly launched session instead of
       // racing terminal input against an editor that Herdr may label idle too early.
-      await herdr(["pane", "run", paneId, launchCommand(session, initialMessage)], signal);
+      if (!core) await herdr(["pane", "run", paneId, launchCommand(session, initialMessage)], signal);
       let runtime: HerdrPane;
       if (initialMessage) {
         const accepted = await waitForNewUserMessage(
@@ -680,9 +723,9 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           signal,
         );
         if (!accepted) throw new Error("Pi did not accept its CLI starting prompt before the timeout");
-        const paneResponse = await herdr(["pane", "get", paneId], signal);
-        if (!paneResponse.result?.pane) throw new Error("Herdr lost the Pi pane after accepting its starting prompt");
-        runtime = paneResponse.result.pane;
+        const pane = core ? await core.get(paneId, signal) : (await herdr(["pane", "get", paneId], signal)).result?.pane;
+        if (!pane) throw new Error("Herdr lost the Pi runtime after accepting its starting prompt");
+        runtime = pane;
       } else {
         runtime = await waitUntilReady(paneId, signal);
       }
@@ -692,7 +735,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     } catch (error) {
       let cleanupError: unknown;
       try {
-        await herdr(["tab", "close", tabId]);
+        if (core && coreRuntime) await core.stop(coreRuntime, session.sessionPath);
+        else await herdr(["tab", "close", tabId!]);
       } catch (closeError) {
         cleanupError = closeError;
       }
@@ -761,6 +805,11 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
     const targets = live.filter((pane) => runtimes.some((target) => target.pane_id === pane.pane_id));
     const closedTabs = new Set<string>();
     for (const pane of targets) {
+      if (isCorePane(pane)) {
+        if (!visibleCore) throw new Error("The session's core is unavailable");
+        await visibleCore.stop(pane, session.sessionPath, signal);
+        continue;
+      }
       if (pane.tab_id && closedTabs.has(pane.tab_id)) continue;
       const ownsWholeTab = session.orchestrated && pane.tab_id && index.panes
         .filter((other) => other.tab_id === pane.tab_id)
@@ -1031,7 +1080,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const runtime = await oneRuntime(session, signal);
           startMonitor(session);
           return toolResult(
-            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nFast Mode: ${params.fast ? "on" : "off"}\nSession: ${session.sessionPath}\nHerdr tab: ${runtime?.tab_id ?? "running"}\nStarting message sent and accepted.`,
+            `Created ${session.id} (${session.name})\nLifecycle: ${session.lifecycle}\nFast Mode: ${params.fast ? "on" : "off"}\nSession: ${session.sessionPath}\nRuntime: ${runtime ? runtimeLocation(runtime) : "running"}\nStarting message sent and accepted.`,
             { session, runtime, startingMessageAccepted: true },
           );
         }
@@ -1107,7 +1156,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
               requestedEntry?.role === "report" ? "Report: recorded; no model turn requested" :
                 `${params.messageId ? "Requested" : "Latest"} run: ${run?.outcome ?? delivery?.state ?? "unsettled/unknown"}${run?.runId ? ` (${run.runId})` : ""}`,
               `Session: ${session.sessionPath}`,
-              runtimes.length ? `Herdr pane: ${runtimes.map((pane) => pane.pane_id).join(", ")}` : "Herdr pane: stopped",
+              `${core ? "Core terminal" : "Herdr pane"}: ${runtimes.length ? runtimes.map((pane) => pane.pane_id).join(", ") : "stopped"}`,
               latest ? `Latest assistant: ${latest.text}` : "Latest assistant: (none)",
             ].join("\n"),
             { session, status, runtime, runtimes, latest, runId: run?.runId, outcome: run?.outcome, startingMessageAccepted, delivery },
@@ -1224,8 +1273,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
           const session = await resolveSession(params.id, signal);
           const runtime = await oneRuntime(session, signal);
           if (!runtime) throw new Error(`Session ${session.id} is stopped; use resume first, then focus`);
-          if (!runtime.tab_id) throw new Error("Session has no Herdr tab");
-          await herdr(["tab", "focus", runtime.tab_id], signal);
+          await focusRuntime(runtime, signal);
           return toolResult(`Focused ${session.id} (${session.name}).`, { session, runtime });
         }
         case "stop": {
@@ -1245,14 +1293,14 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
             startMonitor(current);
             const accepted = !delivery || delivery.state === "accepted";
             return toolResult(
-              `${runtime ? `Running ${current.id} (${current.name}) in Herdr tab ${runtime.tab_id}.` : `Session ${current.id} (${current.name}) is stopped.`}\nRecovery message ${accepted ? "sent and accepted" : "queued; not yet accepted"}.${delivery ? `\nMessage ID: ${delivery.messageId}\nUse watch/status with this messageId.` : ""}`,
+              `${runtime ? `Running ${current.id} (${current.name}) in ${runtimeLocation(runtime)}.` : `Session ${current.id} (${current.name}) is stopped.`}\nRecovery message ${accepted ? "sent and accepted" : "queued; not yet accepted"}.${delivery ? `\nMessage ID: ${delivery.messageId}\nUse watch/status with this messageId.` : ""}`,
               { session: current, runtime, delivery, messageId: delivery?.messageId, messageAccepted: accepted,
                 startingMessageAccepted: await hasAcceptedStartingMessage(current), recovered: accepted },
             );
           }
           if (!await hasAcceptedStartingMessage(session)) throw missingStartingMessageError(session);
           const { session: current, runtime } = await launchSession(session, signal);
-          return toolResult(`Running ${current.id} (${current.name}) in Herdr tab ${runtime.tab_id}.`, {
+          return toolResult(`Running ${current.id} (${current.name}) in ${runtimeLocation(runtime)}.`, {
             session: current,
             runtime,
             startingMessageAccepted: true,
@@ -1270,7 +1318,8 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
             throw new Error(`Cannot rename while ${session.id} is ${runtime.agent_status}`);
           }
           if (runtime) {
-            await herdr(["pane", "run", runtime.pane_id, `/name ${name}`], signal);
+            if (isCorePane(runtime)) await renameMailbox(MAILBOX_ROOT, mailboxIdentity(session, runtime), name, signal);
+            else await herdr(["pane", "run", runtime.pane_id, `/name ${name}`], signal);
             const deadline = Date.now() + 5_000;
             while (Date.now() < deadline && SessionManager.open(session.sessionPath).getSessionName() !== name) {
               await delay(100, undefined, { signal });
@@ -1278,7 +1327,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
             if (SessionManager.open(session.sessionPath).getSessionName() !== name) {
               throw new Error("Pi did not persist the new session name");
             }
-            if (runtime.tab_id) await herdr(["tab", "rename", runtime.tab_id, name], signal);
+            if (!isCorePane(runtime) && runtime.tab_id) await herdr(["tab", "rename", runtime.tab_id, name], signal);
           } else {
             await withFileMutationQueue(session.sessionPath, async () => {
               SessionManager.open(session.sessionPath).appendSessionInfo(name);

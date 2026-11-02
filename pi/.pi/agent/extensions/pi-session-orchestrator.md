@@ -4,6 +4,59 @@
 It keeps Pi JSONL files authoritative: no embeddings, external search service,
 generated-memory database, or additional dependencies.
 
+## Herdr TUI and app/core backends
+
+The tool's actions and Pi history are the same in both interfaces. Selection is
+local to each Pi process; no sessions or running terminals are migrated:
+
+- **Herdr TUI:** `HERDR_ENV=1` plus `HERDR_WORKSPACE_ID` selects the existing
+  `herdr` CLI adapter. This explicit context wins over inherited `HC_*` variables
+  when the old TUI is nested in a core terminal.
+- **Herdr app / herdr-core:** `HC_TERMINAL_ID` plus `HC_TERMINAL_SOCKET` selects
+  the new adapter. It talks JSON-RPC to that machine's existing core socket;
+  it never starts/restarts a core. New launches use this adapter, not the old TUI.
+- Outside either environment, disk history and recall still work; launching a
+  runtime requires one of the two environments.
+
+Core workers run interactive Pi with their initial prompt passed as an argv
+value, not pasted into a terminal. They retain parent relationships but outlive
+the parent, like independent TUI tabs, and suppress core input notifications in
+favor of the existing draft-safe mailbox. When the parent has Herdr space labels,
+each worker receives the same space and a new tab ID for the app to adopt. Core
+names are unique slugs; the authoritative human-readable name remains Pi's
+session name. Unnamed app tabs may display a number.
+
+Core session startup registers its local session path, ID and process PID as
+`pi-sessions.*` labels. Runtime discovery accepts those labels only for the
+current foreground PID or a verified live Pi descendant of the app's foreground
+shell wrapper; stale child labels cannot claim an ordinary shell. Explicit Pi
+`--session <file.jsonl>` arguments provide a fallback for older runtimes. Session switches update the registration. Reload
+already-running sender and target sessions once to enable the new adapter and
+mailbox; newly launched sessions load them automatically.
+
+On **Debina**, Pi manages Debina's local history, mailbox and core. The app can be
+on another machine: creating, messaging, watching, renaming, stopping and resuming
+workers do not require a window on Debina. Remote terminal addresses returned by
+core listing are deliberately excluded, so identical file paths on another
+machine cannot be mistaken for local sessions. This is not a cross-machine
+session registry.
+
+The normal Debina agent directory discovers both the default old-Herdr server
+and default core. A live transcript is not classified as stopped merely because
+it is hosted by the other manager; resume/send reuses its owner instead of
+launching another Pi. Private agent directories/cores retain their own scope.
+Updated runtime discovery takes effect when an existing process reloads.
+
+`focus` uses the automatic `herdr-ui` bridge. Debina doesn't need a local graphical
+window: reachable Windows/Omarchy screens mirror navigation without a desktop
+picker. A pane-less worker opens in peek instead of creating a second process.
+Partial mirror failures are reported. Focusing an old-Herdr runtime from the app
+selects its old tab and brings the Existing Herdr compatibility view forward.
+Private core sockets/identities are fenced from default-core window navigation.
+Core cleanup revalidates the session and kills only its exact terminal, never an
+entire app tab containing unrelated terminal or mod panes. Live core renames use
+Pi's mailbox and `setSessionName()`, not editor input.
+
 ## Recall past work
 
 Find when a feature was discussed or implemented:
@@ -259,7 +312,9 @@ Cleanup failures are reported, never described as successful closure.
 
 ## Implementation and checks
 
-- `pi-session-orchestrator.ts`: tool surface, Herdr control and monitoring.
+- `pi-session-orchestrator.ts`: shared tool surface, backend selection and monitoring.
+- `pi-sessions/core.ts`: local app/core JSON-RPC adapter, runtime identity,
+  interactive launch, safe terminal cleanup and optional desktop focus.
 - `pi-sessions/store.ts`: stat-validated metadata catalogue and bounded transcript
   cache (256 entries / approximately 32MB of retained text), read-only in-memory
   session projections. First discovery parses files; unchanged listings reuse
@@ -283,6 +338,16 @@ retries, stale receivers/session switches, direct Pi API delivery without editor
 access, and the retained self-send/duplicate-runtime guards. Report checks cover
 non-triggering custom messages, busy-time delivery behind queued prompts,
 deferred-recording receipts, reload-safe retries, and stopped-target rejection.
-Run the standalone TypeScript test with Node/Jiti or Bun and Pi's SDK/package
-aliases. It was validated with Node/Jiti against the installed bundled SDK;
-Herdr is simulated, so the tests do not open or close real sessions.
+Run both suites with the installed Pi SDK/Jiti aliases (no npm install needed):
+
+```sh
+node ~/.pi/agent/extensions/tests/run-pi-sessions.mjs
+```
+
+The runner locates the managed install using `PI_MANAGED_INSTALL_ROOT` or
+`~/.pi/agent/install`; set `PI_TEST_NODE_MODULES` for a different SDK installation.
+`tests/pi-sessions-core.test.ts` uses a disposable core-protocol socket and real
+local mailboxes to cover backend selection, interactive argv, remote-path
+isolation, PID/session switches, queued delivery, draft-safe rename, focus
+errors, startup failure, resume and targeted cleanup. The existing suite keeps
+covering the TUI path. Both simulate runtimes and do not touch live terminals.
