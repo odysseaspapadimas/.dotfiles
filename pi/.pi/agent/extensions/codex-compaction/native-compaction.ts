@@ -1,25 +1,14 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { join } from "node:path";
 import {
 	buildContextEntries,
 	buildSessionContext,
 	convertToLlm,
-	getPackageDir,
 	type SessionEntry,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
-import { calculateCost, getCurrentTools, getDeclaredTools, normalizeContext, type Message, type Model, type Tool, type Usage } from "@earendil-works/pi-ai";
-// Pi's jiti root alias does not resolve pi-ai subpaths. Resolve these exported
-// API helpers from the running host, never a local/older dev dependency copy.
-const hostDir = getPackageDir();
-const hostRequire = createRequire(join(hostDir, "package.json"));
-const aiDir = [join(hostDir, "node_modules", "@earendil-works", "pi-ai"), join(hostDir, "..", "pi-ai")]
-	.find((directory) => existsSync(join(directory, "dist", "api", "openai-responses-shared.js")));
-if (!aiDir) throw new Error("Native compaction requires the running Pi host's pi-ai API helpers.");
-const { convertResponsesMessages } = hostRequire(join(aiDir, "dist", "api", "openai-responses-shared.js")) as typeof import("@earendil-works/pi-ai/api/openai-responses-shared");
-const { createGrammarToolInputProperties } = hostRequire(join(aiDir, "dist", "api", "constrained-sampling.js")) as typeof import("@earendil-works/pi-ai/api/constrained-sampling");
+import { calculateCost, getCurrentTools, normalizeContext, openAIResponsesApi, type Message, type Model, type Tool, type Usage } from "@earendil-works/pi-ai";
+
+const publicResponsesApi = openAIResponsesApi();
 
 export const NATIVE_COMPACTION_KIND = "openai-codex-native-compaction";
 export const NATIVE_COMPACTION_VERSION = 1;
@@ -218,19 +207,26 @@ function responseTool(tool: ToolInfo, deferLoading = false): JsonObject {
 	};
 }
 
-function messagesToResponseItems(model: Model<any>, messages: Message[], tools: ToolInfo[]): ResponseItem[] {
+async function messagesToResponseItems(model: Model<any>, messages: Message[], tools: ToolInfo[]): Promise<ResponseItem[]> {
 	if (isPublicOpenAIModel(model)) {
-		// Use Pi's own public Responses conversion, including system/tool deltas,
-		// grammar calls (codemode), encrypted reasoning, images and call pairing.
-		const context = normalizeContext({ messages });
-		const compat = model.compat;
-		return convertResponsesMessages(model, context, new Set(["openai", "openai-codex"]), {
-			grammarToolInputProperties: createGrammarToolInputProperties(getDeclaredTools(context.messages), compat?.supportsOpenAIGrammarTools ?? false),
-			supportsMidConvoSystemMessages: compat?.supportsMidConvoSystemMessages,
-			supportsAdditionalTools: compat?.supportsAdditionalTools,
-			supportsToolSearch: compat?.supportsToolSearch,
-			toolOptions: { supportsStrictMode: compat?.supportsStrictMode, supportsOpenAIGrammarTools: compat?.supportsOpenAIGrammarTools },
-		}) as ResponseItem[];
+		// Ask the running host to serialize, then stop before sending anything.
+		// Unlike internal pi-ai file imports, this public API also works in the
+		// standalone binary and preserves prompt/tool deltas, grammar and images.
+		let input: ResponseItem[] | undefined;
+		const result = await publicResponsesApi.stream(model, normalizeContext({ messages }), {
+			apiKey: "sk-pi-compaction-serialization-only",
+			maxRetries: 0,
+			fetch: async () => { throw new Error("Native compaction serialization must not send requests."); },
+			onPayload: (payload) => {
+				if (!isJsonObject(payload) || !Array.isArray(payload.input) || !payload.input.every(isResponseItem)) {
+					throw new Error("Pi returned invalid OpenAI Responses input.");
+				}
+				input = payload.input;
+				throw new Error("Native compaction serialization complete.");
+			},
+		}).result();
+		if (!input) throw new Error(`OpenAI Responses serialization failed: ${result.errorMessage ?? "no input returned"}`);
+		return input;
 	}
 	const items: ResponseItem[] = [];
 	const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -334,7 +330,7 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 	return items;
 }
 
-function entriesToResponseItems(model: Model<any>, entries: SessionEntry[], tools: ToolInfo[], initialTools?: Tool[]): ResponseItem[] {
+async function entriesToResponseItems(model: Model<any>, entries: SessionEntry[], tools: ToolInfo[], initialTools?: Tool[]): Promise<ResponseItem[]> {
 	const messages = buildSessionContext(entries).messages;
 	const context = normalizeContext({ messages: convertToLlm(messages), tools: initialTools });
 	return messagesToResponseItems(model, context.messages, tools);
@@ -355,12 +351,12 @@ function assertCheckpointNotInvalidated(branch: SessionEntry[], checkpoint: Nati
 	}
 }
 
-export function effectiveInputForBranch(params: {
+export async function effectiveInputForBranch(params: {
 	branch: SessionEntry[];
 	model: Model<any>;
 	tools: ToolInfo[];
 	excludeLastAssistantError?: boolean;
-}): ResponseItem[] {
+}): Promise<ResponseItem[]> {
 	let branch = params.branch;
 	if (params.excludeLastAssistantError) {
 		const lastAssistantIndex = branch.findLastIndex(
@@ -402,7 +398,7 @@ export function effectiveInputForBranch(params: {
 		}
 		return [
 			...checkpoint.checkpoint.details.replacementHistory.map(cloneItem),
-			...entriesToResponseItems(params.model, tail, params.tools, initialTools),
+			...(await entriesToResponseItems(params.model, tail, params.tools, initialTools)),
 		];
 	}
 

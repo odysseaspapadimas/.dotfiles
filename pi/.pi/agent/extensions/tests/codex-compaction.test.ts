@@ -139,7 +139,7 @@ test("checkpoint parsing remains backwards compatible without treating public ou
   assert.equal(parseNativeCompactionDetails({ ...details(), version: 999 }), undefined);
 });
 
-test("public conversion preserves prompt/tool deltas, grammar calls, reasoning and tool pairing", () => {
+test("public conversion preserves prompt/tool deltas, grammar calls, reasoning and tool pairing", async () => {
   const session = SessionManager.inMemory("/tmp");
   const grammarTool = { name: "grammar_tool", description: "Grammar probe", parameters: Type.Object({ input: Type.String() }),
     constrainedSampling: { type: "grammar" as const, variants: { openai_lark: 'start: "probe"' } } };
@@ -151,7 +151,7 @@ test("public conversion preserves prompt/tool deltas, grammar calls, reasoning a
     { type: "toolCall", name: "grammar_tool", id: "call_probe|ctc_probe", arguments: { input: "probe" } },
   ]));
   session.appendMessage({ role: "toolResult", toolCallId: "call_probe|ctc_probe", toolName: "grammar_tool", content: [{ type: "text", text: "Passed" }], isError: false, timestamp: 3 });
-  const input = effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
+  const input = await effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
   assert.ok(input.some((item) => item.role === "developer" && item.content === "Updated rules"));
   assert.ok(input.some((item) => item.type === "additional_tools"));
   assert.ok(input.some((item) => item.type === "reasoning" && item.encrypted_content === "opaque-reasoning"));
@@ -186,7 +186,7 @@ test("public checkpoint replay restores callable schemas and grammar metadata, n
   assert.ok(payload.input.some((item: ResponseItem) => item.type === "custom_tool_call_output" && item.call_id === "call_after"));
 });
 
-test("replay seeds checkpoint-time tools before later additions, removals and redefinitions", () => {
+test("replay seeds checkpoint-time tools before later additions, removals and redefinitions", async () => {
   const tool = (name: string, description = name) => ({ name, description, parameters: Type.Object({}) });
   for (const inherited of [false, true]) {
     const session = SessionManager.inMemory("/tmp");
@@ -197,7 +197,7 @@ test("replay seeds checkpoint-time tools before later additions, removals and re
     else session.appendCompaction("LOCAL", user, 10000, details(publicModel, [checkpoint()]), true);
     session.appendMessage({ role: "system", content: "New rules", toolsRemoved: [{ name: "read" }], toolsAdded: [tool("read", "tail"), tool("extra")], timestamp: 3 });
     session.appendMessage({ role: "user", content: "Continue", timestamp: 4 });
-    const input = effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
+    const input = await effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
     const batches = input.filter((item) => item.type === "additional_tools").map((item) => item.tools as any[]);
     assert.equal(batches.length, 2);
     assert.deepEqual(batches[0].map((tool) => [tool.name, tool.description]), [["read", "checkpoint"]]);
@@ -208,13 +208,13 @@ test("replay seeds checkpoint-time tools before later additions, removals and re
     // A second compaction snapshots the updated state, rather than resurrecting
     // the initial schemas or duplicating already checkpointed tool updates.
     session.appendCompaction("SECOND", user, 10000, details(publicModel, [checkpoint("second")]), true);
-    const repeated = effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
+    const repeated = await effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
     const tools = repeated.filter((item) => item.type === "additional_tools").flatMap((item) => item.tools as any[]);
     assert.deepEqual(tools.map((tool) => [tool.name, tool.description]), [["read", "tail"], ["extra", "extra"]]);
   }
 });
 
-test("older checkpoints without a system snapshot recover tool declarations from their prefix", () => {
+test("older checkpoints without a system snapshot recover tool declarations from their prefix", async () => {
   const session = SessionManager.inMemory("/tmp");
   session.appendMessage({ role: "system", content: "Rules", toolsAdded: [{ name: "read", description: "Read", parameters: Type.Object({}) }], timestamp: 0 });
   const user = session.appendMessage({ role: "user", content: "Inspect Cedar", timestamp: 1 });
@@ -224,25 +224,25 @@ test("older checkpoints without a system snapshot recover tool declarations from
     const { systemMessage, ...legacy } = entry;
     return legacy;
   });
-  const input = effectiveInputForBranch({ branch, model: publicModel, tools: [] });
+  const input = await effectiveInputForBranch({ branch, model: publicModel, tools: [] });
   assert.deepEqual(input.filter((item) => item.type === "additional_tools").flatMap((item) => (item.tools as any[]).map((tool) => tool.name)), ["read"]);
 });
 
-test("replay follows the active checkpoint branch and does not duplicate retained history", () => {
+test("replay follows the active checkpoint branch and does not duplicate retained history", async () => {
   const session = SessionManager.inMemory("/tmp");
   const old = session.appendMessage({ role: "user", content: "Old pre-checkpoint history", timestamp: 0 });
   const id = session.appendCompaction("LOCAL MARKER", old, 1234, details(), true);
   const tailId = session.appendMessage({ role: "user", content: "Next step", timestamp: 2 });
-  const input = effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
+  const input = await effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
   assert.deepEqual(input.slice(0, 2), [checkpoint(), acknowledgement]);
   assert.equal(input.length, 3);
   assert.equal(JSON.stringify(input).includes("LOCAL MARKER"), false);
   assert.equal(JSON.stringify(input).includes("Old pre-checkpoint history"), false);
   assert.ok(JSON.stringify(input).includes("Next step"));
-  assert.throws(() => effectiveInputForBranch({ branch: session.getBranch(), model: codexModel, tools: [] }), /different model/);
+  await assert.rejects(effectiveInputForBranch({ branch: session.getBranch(), model: codexModel, tools: [] }), /different model/);
   session.branch(id);
   session.appendMessage({ role: "user", content: "Alternative", timestamp: 3 });
-  const alternative = effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
+  const alternative = await effectiveInputForBranch({ branch: session.getBranch(), model: publicModel, tools: [] });
   assert.ok(JSON.stringify(alternative).includes("Alternative"));
   assert.equal(JSON.stringify(alternative).includes("Next step"), false);
   assert.notEqual(session.getLeafId(), tailId);
@@ -298,6 +298,26 @@ test("failed public compaction cancels without changing history or falling back 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("serialization errors cancel compaction and block checkpoint replay without network requests", async () => {
+  const h = harness({ ...publicModel, samplingParams: { input: "invalid" } });
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => { requests++; throw new Error("No network allowed"); };
+  try {
+    const before = h.session.getBranch();
+    await assert.rejects(effectiveInputForBranch({ branch: before, model: h.ctx.model!, tools: [] }), /invalid OpenAI Responses input/);
+    assert.deepEqual(await h.handlers.get("session_before_compact")!(h.compactEvent(), h.ctx), { cancel: true });
+    assert.deepEqual(h.session.getBranch(), before);
+    h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details());
+    const payload = await h.handlers.get("before_provider_request")!({ payload: { input: [], previous_response_id: "stale" } }, h.ctx);
+    assert.equal(h.aborted(), true);
+    assert.deepEqual(payload.input, []);
+    assert.equal(payload.previous_response_id, undefined);
+    assert.ok(h.notifications.some((message) => message.includes("serialization failed")));
+    assert.equal(requests, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("malformed, incomplete and missing public checkpoints fail closed", async () => {
   await assert.rejects(callRemoteCompaction({ url: "https://example.invalid", headers: new Headers(), body: {}, model: publicModel,
     fetchImpl: async () => sse([acknowledgement]) }), /no pre-generation compaction checkpoint/);
@@ -319,12 +339,12 @@ test("unsupported provider switches abort instead of continuing with a local mar
   assert.ok(h.notifications.some((message) => message.includes("Switch back")));
 });
 
-test("retained pre-checkpoint context edits still block opaque replay", () => {
+test("retained pre-checkpoint context edits still block opaque replay", async () => {
   const session = SessionManager.inMemory("/tmp");
   const target = session.appendMessage({ role: "user", content: "Retained user turn", timestamp: 1 });
   session.appendCompaction("LOCAL", target, 1234, details(), true);
   const branch = [...session.getBranch(), { type: "context_edit", id: "edit", parentId: session.getLeafId(), targetId: target, timestamp: new Date().toISOString(), operation: "omit" }] as unknown as SessionEntry[];
-  assert.throws(() => effectiveInputForBranch({ branch, model: publicModel, tools: [] }), /context edit/);
+  await assert.rejects(effectiveInputForBranch({ branch, model: publicModel, tools: [] }), /context edit/);
 });
 
 test("Codex keeps its previous trigger, headers and user-retention semantics", async () => {

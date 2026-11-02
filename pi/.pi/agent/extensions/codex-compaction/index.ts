@@ -229,7 +229,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 
 		try {
 			if (checkpoint.status === "none") return undefined;
-			const input = effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
+			const input = await effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
 			const payload: JsonObject = { ...event.payload, input };
 			// The inline checkpoint replaces the leading system message too.
 			// Supply the current prompt independently, as the Responses API allows.
@@ -256,7 +256,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 		try {
 			const sessionId = ctx.sessionManager.getSessionId();
 			const branch = event.branchEntries as SessionEntry[];
-			const input = effectiveInputForBranch({
+			const input = await effectiveInputForBranch({
 				branch,
 				model,
 				tools: pi.getAllTools(),
