@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
   SessionManager,
   getAgentDir,
@@ -66,8 +65,8 @@ function sessionDirectory(cwd: string): string {
   return join(SESSION_ROOT, safePath);
 }
 
-const SessionLifecycle = StringEnum(["persistent", "task"] as const);
-const ThinkingLevel = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+const SessionLifecycle = Type.Enum(["persistent", "task"] as const, { type: "string" });
+const ThinkingLevel = Type.Enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { type: "string" });
 
 interface HerdrAgentSession {
   kind?: "id" | "path" | string;
@@ -1022,7 +1021,7 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       query: Type.Optional(Type.String({ maxLength: 500, description: "Topic keywords for recall (lexical ranked search); omit for recent activity" })),
       after: Type.Optional(Type.String({ description: "Recall message date lower bound: ISO or duration such as 2w; default 14d only when query is omitted" })),
       before: Type.Optional(Type.String({ description: "Recall message date exclusive upper bound: ISO or relative duration" })),
-      scope: Type.Optional(StringEnum(["all", "active", "historical", "children"] as const)),
+      scope: Type.Optional(Type.Enum(["all", "active", "historical", "children"] as const, { type: "string" })),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "List/recall pagination offset; default 0" })),
       cursor: Type.Optional(Type.String({ description: "Read starting entry ID from recall, or nextCursor from a previous read" })),
       createdAfter: Type.Optional(Type.String({ description: "List sessions created after ISO date/time or relative duration (for example 3d)" })),

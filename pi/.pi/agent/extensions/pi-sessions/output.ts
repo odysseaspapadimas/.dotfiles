@@ -1,9 +1,8 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 
-export const Action = StringEnum([
+export const Action = Type.Enum([
   "create", "list", "recall", "status", "read", "send", "report", "watch", "focus", "stop", "resume", "rename",
-] as const);
+] as const, { type: "string" });
 export type ActionName = Static<typeof Action>;
 
 const Session = Type.Object({
@@ -17,8 +16,8 @@ const Session = Type.Object({
   provider: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
   thinking: Type.Optional(Type.String()),
-  lifecycle: StringEnum(["persistent", "task"] as const),
-  origin: StringEnum(["created", "discovered", "historical"] as const),
+  lifecycle: Type.Enum(["persistent", "task"] as const, { type: "string" }),
+  origin: Type.Enum(["created", "discovered", "historical"] as const, { type: "string" }),
   orchestrated: Type.Boolean(),
   parentSessionId: Type.Optional(Type.String()),
 });
@@ -34,14 +33,14 @@ const Pane = Type.Object({
 });
 const Message = Type.Object({
   id: Type.String(),
-  role: StringEnum(["user", "assistant", "report", "summary"] as const),
+  role: Type.Enum(["user", "assistant", "report", "summary"] as const, { type: "string" }),
   text: Type.String(),
   timestamp: Type.Number({ description: "Unix milliseconds" }),
   stopReason: Type.Optional(Type.String()),
 });
 const Delivery = Type.Object({
   messageId: Type.String(),
-  state: StringEnum(["queued", "accepted", "unknown", "rejected"] as const),
+  state: Type.Enum(["queued", "accepted", "unknown", "rejected"] as const, { type: "string" }),
   entryId: Type.Optional(Type.String()),
   error: Type.Optional(Type.String()),
 });
@@ -91,7 +90,7 @@ export const SessionOutput = Type.Object({
   stoppedRuntimes: Type.Optional(Type.Array(Pane)),
   latest: Type.Optional(Message),
   runId: Type.Optional(Type.String({ description: "User entry identifying the observed run" })),
-  outcome: Type.Optional(StringEnum(["completed", "failed", "aborted", "superseded"] as const)),
+  outcome: Type.Optional(Type.Enum(["completed", "failed", "aborted", "superseded"] as const, { type: "string" })),
   delivery: Type.Optional(Delivery),
   messageId: Type.Optional(Type.String()),
   messageAccepted: Type.Optional(Type.Boolean()),

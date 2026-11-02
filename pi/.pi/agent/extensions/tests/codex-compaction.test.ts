@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { getModel, Type, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { getModel, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { SessionManager, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { registerCodexCompactionExtension } from "../codex-compaction/index.ts";
 import {

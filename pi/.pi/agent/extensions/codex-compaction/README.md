@@ -2,7 +2,7 @@
 
 Locally maintained fork of `@ogulcancelik/pi-codex-compaction` **0.1.6**, by Can Celik. The upstream MIT license is preserved in `LICENSE`.
 
-Pi discovers this directory through `index.ts`. Do not also enable the npm package: both register the same compaction hooks. Uses the running host's public `pi-ai` API, supporting both standalone binaries and Node installations (tested on Pi 1.4); no separate host dependency is installed here.
+Pi discovers this directory through `index.ts`. Do not also enable the npm package: both register the same compaction hooks. Uses the running host's public `pi-ai` API, supporting both standalone binaries and Node installations (tested on Pi 1.4 and 1.5); no separate host dependency is installed here.
 
 ## Connections
 

@@ -17,7 +17,8 @@ test("the installed CLI loads native compaction and serializes checkpoints offli
     const probe = join(root, "probe.ts");
     await writeFile(probe, `
 import assert from "node:assert/strict";
-import { getModel, Type } from "@earendil-works/pi-ai";
+import { getModel } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import compactionExtension from ${JSON.stringify(extension)};
 import { effectiveInputForBranch, modelKey, NATIVE_COMPACTION_KIND } from ${JSON.stringify(native)};
