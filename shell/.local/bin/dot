@@ -5,14 +5,16 @@ repo="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 packages=(pi herdr hunk portd nvim ghostty kitty omarchy shell luca)
 stow_only=false
 sync_only=false
+packages_only=false
 
 case ${1:-} in
   --stow-only) stow_only=true; shift ;;
   --sync-only) sync_only=true; shift ;;
+  --packages-only) packages_only=true; shift ;;
 esac
 
 if (($#)); then
-  echo "usage: dot [--stow-only | --sync-only]" >&2
+  echo "usage: dot [--stow-only | --sync-only | --packages-only]" >&2
   exit 2
 fi
 
@@ -239,6 +241,11 @@ ensure_fish_login_shell() {
   fi
 }
 
+# Explicit opt-in: no pull, Stow, settings localization, or desktop bootstrap.
+if [[ $packages_only == true ]]; then
+  exec python3 "$repo/shell/.local/bin/pi-packages"
+fi
+
 localize_fish_state
 localize_pi_settings
 
@@ -264,6 +271,7 @@ if [[ $stow_only == false ]]; then
   restore_migration_backup
   install_cli_dependencies
   install_personal_tools
+  python3 "$repo/shell/.local/bin/pi-packages"
   install_dotfile_tools
   ensure_fish_login_shell
 fi

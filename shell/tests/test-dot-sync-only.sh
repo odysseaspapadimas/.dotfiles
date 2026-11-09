@@ -18,7 +18,7 @@ case "$*" in
  *) echo 'unexpected Git operation' >&2; exit 99 ;;
 esac
 MOCK
-for program in stow systemctl curl sudo chsh; do
+for program in stow systemctl curl sudo chsh pi; do
  printf '#!/bin/sh\necho "unexpected side effect" >&2\nexit 99\n' > "$root/bin/$program"
 done
 chmod +x "$root/bin/"*

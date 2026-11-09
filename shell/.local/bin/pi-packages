@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Reconcile personal Pi npm packages, without sharing the rest of settings.json."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+MANIFEST = Path(__file__).resolve().parents[3] / "pi/packages.json"
+NPM_SOURCE = re.compile(r"npm:((?:@[a-z0-9_.-]+/)?[a-z0-9][a-z0-9_.-]*)(?:@([^\s]+))?")
+
+
+def package_name(source):
+    match = NPM_SOURCE.fullmatch(source) if isinstance(source, str) else None
+    if not match:
+        raise ValueError(f"invalid npm package source: {source!r}")
+    return match[1]
+
+
+def desired_packages(path):
+    manifest = json.loads(path.read_text())
+    if not isinstance(manifest, dict) or manifest.get("schema") != 1 or not isinstance(manifest.get("packages"), list):
+        raise ValueError("expected a schema 1 manifest with a packages array")
+    desired = {}
+    for source in manifest["packages"]:
+        name = package_name(source)
+        if name in desired:
+            raise ValueError(f"duplicate package in manifest: {name}")
+        desired[name] = source
+    return desired
+
+
+def plan(settings, agent, desired):
+    data = json.loads(settings.read_text()) if settings.exists() else {}
+    if not isinstance(data, dict) or not isinstance(data.get("packages", []), list):
+        raise ValueError("Pi settings must contain a packages array")
+    current = {}
+    for entry in data.get("packages", []):
+        source = entry.get("source") if isinstance(entry, dict) else entry
+        if not isinstance(source, str):
+            raise ValueError("invalid package declaration in Pi settings")
+        if not source.startswith("npm:"):
+            continue  # Local paths and git packages remain machine-local.
+        name = package_name(source)
+        if name in current:
+            raise ValueError(f"duplicate npm package in Pi settings: {name}")
+        current[name] = source
+    # Install first: a failed addition must not remove working packages.
+    installs = [("install", source) for name, source in desired.items()
+                if current.get(name) != source or not (agent / "npm/node_modules" / name / "package.json").is_file()]
+    removes = [("remove", source) for name, source in current.items() if name not in desired]
+    return installs + removes
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="show drift without changes; exit 1 if reconciliation is needed")
+    parser.add_argument("--manifest", type=Path, default=MANIFEST)
+    args = parser.parse_args()
+    desired = desired_packages(args.manifest)  # Validate before touching local state.
+    agent = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent"))).expanduser().resolve()
+    settings = agent / "settings.json"
+    template = MANIFEST.parent / ".pi/agent/settings.json"
+    if settings.is_symlink() or settings.resolve() == template.resolve():
+        raise ValueError("Pi settings is repo-backed or a symlink; run dot --sync-only to localize it first")
+    if args.check:
+        actions = plan(settings, agent, desired)
+        for action, source in actions:
+            print(f"pi-packages: would {action} {source}")
+        if not actions:
+            print("pi-packages: shared npm packages match")
+        return int(bool(actions))
+    agent.mkdir(parents=True, exist_ok=True)
+    # Serialize our own invocations; Pi's CLI owns its settings writes/locking.
+    with (agent / ".dotfiles-packages.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        actions = plan(settings, agent, desired)
+        if not actions:
+            print("pi-packages: shared npm packages match")
+            return 0
+        executable = shutil.which("pi")
+        if not executable:
+            raise ValueError("pi is not installed; no settings were changed")
+        if settings.exists():
+            backups = agent / "dotfiles-package-backups"
+            backups.mkdir(mode=0o700, exist_ok=True)
+            fd, backup = tempfile.mkstemp(prefix="settings-", suffix=".json", dir=backups)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(settings.read_bytes())
+            print(f"pi-packages: local settings backup: {backup}", flush=True)
+        for action, source in actions:
+            print(f"pi-packages: {action} {source}", flush=True)
+            subprocess.run([executable, action, source], cwd=Path.home(), check=True,
+                           env={**os.environ, "PI_CODING_AGENT_DIR": str(agent)})
+        if plan(settings, agent, desired):
+            raise ValueError("package reconciliation is incomplete; rerun pi-packages")
+        print("pi-packages: synchronized; reload existing Pi sessions when idle")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"pi-packages: {error}", file=sys.stderr)
+        sys.exit(1)
