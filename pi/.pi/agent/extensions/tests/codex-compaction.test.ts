@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { getModel, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { getModel, normalizeContext, openAIResponsesApi, openAICodexResponsesApi, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { SessionManager, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, SessionManager, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { registerCodexCompactionExtension } from "../codex-compaction/index.ts";
 import {
   buildPublicCompactionRequestBody, buildPublicHeaders, buildReplacementHistory,
   callRemoteCompaction, effectiveInputForBranch, isNativeCompactionModel,
   NATIVE_COMPACTION_KIND, parseNativeCompactionDetails, modelKey,
-  resolvePublicResponsesUrl, type NativeCompactionDetails, type ResponseItem,
+  resolvePublicResponsesUrl, replaceCheckpointedMessages, spliceCheckpointHistory,
+  type NativeCompactionDetails, type ResponseItem,
 } from "../codex-compaction/native-compaction.ts";
 
 const publicModel = getModel("openai", "gpt-6.1-sol")!;
@@ -41,7 +42,7 @@ function assistant(content: AssistantMessage["content"]): AssistantMessage {
   };
 }
 
-function harness(model: Model<any> = publicModel) {
+function harness(model: Model<any> = publicModel, hostVersion = "1.5.0") {
   const session = SessionManager.inMemory("/tmp");
   session.appendMessage({ role: "user", content: "Continue the Cedar refactor; preserve tests.", timestamp: 1 });
   const handlers = new Map<string, (...args: any[]) => any>();
@@ -58,13 +59,34 @@ function harness(model: Model<any> = publicModel) {
     abort: () => { aborted = true; }, getSystemPrompt: () => "Current project rules",
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "opaque-subscription-token", headers: { "x-test": "retained", "x-removed": null } }) },
   } as unknown as ExtensionContext;
-  registerCodexCompactionExtension(pi as unknown as ExtensionAPI, "1.1.0");
+  registerCodexCompactionExtension(pi as unknown as ExtensionAPI, hostVersion);
   const compactEvent = () => ({
     branchEntries: session.getBranch(), reason: "manual", willRetry: false,
     preparation: { firstKeptEntryId: session.getBranch()[0]!.id, tokensBefore: 450001 },
     signal: new AbortController().signal,
   });
   return { session, handlers, ctx, notifications, compactEvent, aborted: () => aborted };
+}
+
+// Run both real Pi serializers, stopping before any authentication or network I/O.
+// The hook must keep what Pi serialized, not reconstruct tools from names.
+async function serializedRequest(h: ReturnType<typeof harness>) {
+  let messages = h.session.buildSessionProjection().messages;
+  if (messages[0]?.role !== "system") messages = [{ role: "system", content: h.ctx.getSystemPrompt(), timestamp: 0 }, ...messages];
+  messages = h.handlers.get("context_with_system")!({ messages: structuredClone(messages) }, h.ctx)?.messages ?? messages;
+  const api = h.ctx.model!.provider === "openai" ? openAIResponsesApi() : openAICodexResponsesApi();
+  let before: any;
+  const token = `synthetic.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline-probe" } })).toString("base64url")}.signature`;
+  const result = await api.stream(h.ctx.model! as any, normalizeContext({ messages: convertToLlm(messages) }), {
+    apiKey: token, maxRetries: 0,
+    fetch: async () => { throw new Error("No network allowed"); },
+    onPayload: (payload) => { before = structuredClone(payload); throw new Error("Serialization complete"); },
+  }).result();
+  assert.ok(before, `Pi must produce a real provider payload: ${result.errorMessage}`);
+  const original = structuredClone(before);
+  const payload = await h.handlers.get("before_provider_request")!({ payload: before }, h.ctx) ?? before;
+  assert.deepEqual(before, original, "the provider payload is not mutated");
+  return { before, payload };
 }
 
 test("native compaction supports only the two OpenAI Responses connections", () => {
@@ -173,11 +195,12 @@ test("public checkpoint replay restores callable schemas and grammar metadata, n
 
   // Modern Responses requests have no top-level tools: Pi declares them inline.
   // Replacing input must not drop those declarations or the grammar call metadata.
-  const payload = await h.handlers.get("before_provider_request")!({ payload: {
-    model: publicModel.id, input: [{ type: "additional_tools", role: "developer", tools: [{ name: "read" }, { name: "codemode" }] }],
-  } }, h.ctx);
+  const { before, payload } = await serializedRequest(h);
+  assert.equal(h.aborted(), false);
   assert.equal(payload.tools, undefined);
-  assert.deepEqual(payload.input[0], checkpoint());
+  assert.deepEqual(payload.input.find((item: ResponseItem) => item.type === "compaction"), checkpoint());
+  assert.deepEqual(payload.input.filter((item: ResponseItem) => item.type === "additional_tools"),
+    before.input.filter((item: ResponseItem) => item.type === "additional_tools"));
   const declarations = payload.input.filter((item: ResponseItem) => item.type === "additional_tools").flatMap((item: ResponseItem) => item.tools);
   assert.deepEqual(declarations.map((tool: any) => tool.name), ["read", "codemode"]);
   assert.equal(declarations[0].parameters.properties.path.type, "string");
@@ -187,7 +210,7 @@ test("public checkpoint replay restores callable schemas and grammar metadata, n
   assert.ok(payload.input.some((item: ResponseItem) => item.type === "custom_tool_call_output" && item.call_id === "call_after"));
 });
 
-test("replay seeds checkpoint-time tools before later additions, removals and redefinitions", async () => {
+test("maintenance serialization seeds checkpoint-time tools before later deltas", async () => {
   const tool = (name: string, description = name) => ({ name, description, parameters: Type.Object({}) });
   for (const inherited of [false, true]) {
     const session = SessionManager.inMemory("/tmp");
@@ -272,17 +295,18 @@ test("native compaction runs through the public hook and restores the current pr
     assert.ok(result.compaction.usage);
     h.session.appendCompaction(result.compaction.summary, result.compaction.firstKeptEntryId, result.compaction.tokensBefore, result.compaction.details, true, result.compaction.usage);
     h.session.appendMessage({ role: "user", content: "Resume now", timestamp: 4 });
-    const payload = await h.handlers.get("before_provider_request")!({ payload: { model: publicModel.id, input: [{ role: "user", content: "do not duplicate" }], previous_response_id: "stale" } }, h.ctx);
-    assert.deepEqual(payload.input[0], checkpoint("early"));
-    assert.equal(payload.instructions, "Current project rules");
+    const { payload } = await serializedRequest(h);
+    assert.equal(h.aborted(), false);
+    assert.deepEqual(payload.input.find((item: ResponseItem) => item.type === "compaction"), checkpoint("early"));
+    assert.ok(JSON.stringify(payload).includes("Current project rules"));
     assert.equal(payload.previous_response_id, undefined);
-    assert.equal(payload.input.length, 2);
+    assert.equal(payload.input.filter((item: ResponseItem) => item.role === "user").length, 1);
+    assert.equal(JSON.stringify(payload).includes("Continue the Cedar refactor"), false);
     assert.equal(calls, 1);
     const headers: Record<string, string> = {};
     h.handlers.get("before_provider_headers")!({ headers }, h.ctx);
     assert.deepEqual(headers, {});
-    const context = h.handlers.get("context")!({ messages: [{ role: "compactionSummary", summary: "LOCAL" }, { role: "user", content: "Resume now" }] }, h.ctx);
-    assert.deepEqual(context.messages, [{ role: "user", content: "Resume now" }]);
+    assert.equal(JSON.stringify(payload).includes(result.compaction.summary), false);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -299,7 +323,7 @@ test("failed public compaction cancels without changing history or falling back 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("serialization errors cancel compaction and block checkpoint replay without network requests", async () => {
+test("serialization errors cancel maintenance and missing context blocks live replay offline", async () => {
   const h = harness({ ...publicModel, samplingParams: { input: "invalid" } });
   const originalFetch = globalThis.fetch;
   let requests = 0;
@@ -315,6 +339,7 @@ test("serialization errors cancel compaction and block checkpoint replay without
     assert.deepEqual(payload.input, []);
     assert.equal(payload.previous_response_id, undefined);
     assert.ok(h.notifications.some((message) => message.includes("serialization failed")));
+    assert.ok(h.notifications.some((message) => message.includes("context for this request")));
     assert.equal(requests, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -346,6 +371,109 @@ test("retained pre-checkpoint context edits still block opaque replay", async ()
   session.appendCompaction("LOCAL", target, 1234, details(), true);
   const branch = [...session.getBranch(), { type: "context_edit", id: "edit", parentId: session.getLeafId(), targetId: target, timestamp: new Date().toISOString(), operation: "omit" }] as unknown as SessionEntry[];
   await assert.rejects(effectiveInputForBranch({ branch, model: publicModel, tools: [] }), /context edit/);
+});
+
+for (const hostVersion of ["1.4.0", "1.5.0"]) {
+  for (const model of [publicModel, codexModel]) {
+    for (const inherited of [false, true]) {
+      test(`#57: ${model.provider} on Pi ${hostVersion}, ${inherited ? "inherited" : "persisted"} checkpoint preserves Pi's serialized tool state`, async () => {
+        const h = harness(model, hostVersion);
+        const tool = (name: string, description = name) => ({ name, description, parameters: Type.Object({ path: Type.String() }) });
+        const grammar = { name: "codemode", description: "Grammar probe", parameters: Type.Object({ input: Type.String() }),
+          constrainedSampling: { type: "grammar" as const, variants: { openai_lark: 'start: "probe"' } } };
+        h.session.appendMessage({ role: "system", content: "Checkpoint rules", toolsAdded: [tool("read"), tool("removed"), grammar], timestamp: 0 });
+        const kept = h.session.appendMessage({ role: "user", content: "Covered user turn", timestamp: 1 });
+        const history = model.provider === "openai" ? [checkpoint()] : [{ role: "user", content: "Retained requirement" }, checkpoint()];
+        const appendCheckpoint = (items: ResponseItem[]) => inherited
+          ? h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details(model, items))
+          : h.session.appendCompaction("LOCAL", kept, 10000, details(model, items), true);
+        appendCheckpoint(history);
+        // These deltas must remain AFTER the checkpoint, including the removal notice.
+        h.session.appendMessage({ role: "system", content: "Updated project rules", toolsRemoved: [{ name: "removed" }, { name: "read" }],
+          toolsAdded: [tool("read", "Updated read schema"), tool("extra")], timestamp: 2 });
+        h.session.appendMessage({ ...assistant([{ type: "toolCall", name: "codemode", id: "call_live|ctc_live", arguments: { input: "probe" } }]),
+          provider: model.provider, api: model.api, model: model.id });
+        h.session.appendMessage({ role: "toolResult", toolCallId: "call_live|ctc_live", toolName: "codemode", content: [{ type: "text", text: "Passed" }], isError: false, timestamp: 3 });
+        // Queued during compaction: its message timestamp predates the checkpoint.
+        h.session.appendMessage({ role: "user", content: "Queued while compacting", timestamp: 1 });
+        const branchBefore = structuredClone(h.session.getBranch());
+        const { before, payload } = await serializedRequest(h);
+        const original = structuredClone(before);
+        assert.equal(h.aborted(), false, h.notifications.join("\n"));
+        assert.equal(before.tools, undefined, "exercise inline additional_tools, not a top-level tools array");
+        const markerIndex = before.input.findIndex((item: ResponseItem) => item.role === "user" && JSON.stringify(item.content).includes("OpenAI Codex native compaction history"));
+        assert.ok(markerIndex >= 0);
+        assert.deepEqual(payload, { ...before, input: [...before.input.slice(0, markerIndex), ...history, ...before.input.slice(markerIndex + 1)] });
+        assert.ok(before.input.some((item: ResponseItem) => item.type === "additional_tools"));
+        assert.ok(before.input.some((item: ResponseItem) => JSON.stringify(item).includes("no longer available")));
+        assert.ok(payload.input.some((item: ResponseItem) => item.type === "custom_tool_call" && item.input === "probe"));
+        assert.ok(JSON.stringify(payload).includes("Queued while compacting"));
+        assert.equal(JSON.stringify(payload).includes("Covered user turn"), false);
+        assert.equal(JSON.stringify(payload).includes("OpenAI Codex native compaction history"), false);
+        assert.deepEqual(h.session.getBranch(), branchBefore, "live replay must not rewrite saved history");
+        const retried = await h.handlers.get("before_provider_request")!({ payload: before }, h.ctx);
+        assert.deepEqual(retried, payload);
+        assert.deepEqual(before, original, "the provider payload is not mutated");
+
+        appendCheckpoint([checkpoint("second")]);
+        h.session.appendMessage({ role: "user", content: "After second checkpoint", timestamp: 4 });
+        const repeated = (await serializedRequest(h)).payload;
+        assert.equal(h.aborted(), false, h.notifications.join("\n"));
+        assert.deepEqual(repeated.input.filter((item: ResponseItem) => item.type === "compaction"), [checkpoint("second")]);
+        assert.equal(JSON.stringify(repeated).includes("Queued while compacting"), false);
+        assert.ok(JSON.stringify(repeated).includes("After second checkpoint"));
+      });
+    }
+  }
+}
+
+test("placeholder helpers keep system updates and queued messages without mutating input", () => {
+  const system = { role: "system", content: "Rules", timestamp: 0 };
+  const covered = { role: "user", content: "same text", timestamp: 1 };
+  const queued = { ...covered };
+  const placeholder = { role: "user", content: "MARKER", timestamp: 2 };
+  const messages = [system, covered, queued];
+  assert.deepEqual(replaceCheckpointedMessages(messages, [system, covered], placeholder), [system, placeholder, queued]);
+  assert.deepEqual(messages, [system, covered, queued]);
+  assert.deepEqual(replaceCheckpointedMessages([system], [], placeholder), [system, placeholder]);
+  const input = [{ role: "user", content: [{ type: "input_text", text: "MARKER" }] }];
+  const history = [checkpoint()];
+  const spliced = spliceCheckpointHistory(input, "MARKER", history);
+  spliced[0].encrypted_content = "changed clone";
+  assert.deepEqual(history, [checkpoint()]);
+  assert.throws(() => spliceCheckpointHistory([], "MARKER", history), /Could not place/);
+  assert.throws(() => spliceCheckpointHistory([...input, ...input], "MARKER", history), /Could not place/);
+});
+
+for (const failure of ["missing", "duplicate", "stale branch", "reset"] as const) {
+  test(`live checkpoint replay fails closed when its placeholder is ${failure}`, async () => {
+    const h = harness();
+    h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details());
+    const { before } = await serializedRequest(h);
+    if (failure === "missing") before.input = [];
+    if (failure === "duplicate") before.input.push(before.input.find((item: ResponseItem) => item.role === "user"));
+    if (failure === "stale branch") h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details(publicModel, [checkpoint("other")]));
+    if (failure === "reset") h.handlers.get("session_start")!({}, h.ctx);
+    before.previous_response_id = "stale";
+    const payload = await h.handlers.get("before_provider_request")!({ payload: before }, h.ctx);
+    assert.equal(h.aborted(), true);
+    assert.deepEqual(payload.input, []);
+    assert.equal(payload.previous_response_id, undefined);
+    assert.ok(h.notifications.some((message) => message.includes("blocked")));
+  });
+}
+
+test("no-checkpoint requests are untouched; malformed and mismatched checkpoints block replay", async () => {
+  const h = harness();
+  const plain = await serializedRequest(h);
+  assert.deepEqual(plain.payload, plain.before);
+  for (const bad of [{ ...details(), version: 999 }, details(codexModel, [checkpoint()])]) {
+    const broken = harness();
+    broken.session.appendCustomEntry(NATIVE_COMPACTION_KIND, bad);
+    const { payload } = await serializedRequest(broken);
+    assert.equal(broken.aborted(), true);
+    assert.deepEqual(payload.input, []);
+  }
 });
 
 test("Codex keeps its previous trigger, headers and user-retention semantics", async () => {

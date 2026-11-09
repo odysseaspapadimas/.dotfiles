@@ -17,10 +17,10 @@ test("the installed CLI loads native compaction and serializes checkpoints offli
     const probe = join(root, "probe.ts");
     await writeFile(probe, `
 import assert from "node:assert/strict";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel, normalizeContext, openAIResponsesApi } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import compactionExtension from ${JSON.stringify(extension)};
+import { convertToLlm, SessionManager } from "@earendil-works/pi-coding-agent";
+import compactionExtension, { registerCodexCompactionExtension } from ${JSON.stringify(extension)};
 import { effectiveInputForBranch, modelKey, NATIVE_COMPACTION_KIND } from ${JSON.stringify(native)};
 
 export default async function (pi) {
@@ -69,6 +69,34 @@ export default async function (pi) {
     assert.ok(replay.some((item) => item.type === "additional_tools" && item.tools.some((entry) => entry.name === tool.name && entry.type === "custom")));
     assert.ok(replay.some((item) => item.type === "custom_tool_call_output" && item.call_id === "call_after"));
     assert.equal(JSON.stringify(replay).includes("Synthetic user turn"), false);
+
+    // Verify the new live replay path in the actual launcher too, including
+    // standalone hosts: serialize around the placeholder, not a rebuilt input.
+    const handlers = new Map();
+    registerCodexCompactionExtension({
+      on: (name, handler) => { handlers.set(name, handler); return () => {}; },
+      registerEntryRenderer() {}, getAllTools: () => [], getActiveTools: () => [],
+    });
+    const ctx = { model, sessionManager: session, mode: "print", hasUI: false,
+      getSystemPrompt: () => "Synthetic rules", abort: () => { throw new Error("Unexpected replay abort"); } };
+    const projected = session.buildSessionProjection().messages;
+    const context = handlers.get("context_with_system")({ messages: projected }, ctx);
+    let serialized;
+    await openAIResponsesApi().stream(model, normalizeContext({ messages: convertToLlm(context.messages) }), {
+      apiKey: "serialization-only", maxRetries: 0,
+      fetch: async () => { throw new Error("No network allowed"); },
+      onPayload: (payload) => { serialized = payload; throw new Error("Serialization complete"); },
+    }).result();
+    assert.ok(serialized);
+    const original = structuredClone(serialized);
+    const patched = await handlers.get("before_provider_request")({ payload: serialized }, ctx);
+    assert.deepEqual(serialized, original);
+    assert.deepEqual(patched.input.filter((item) => item.type === "additional_tools"),
+      original.input.filter((item) => item.type === "additional_tools"));
+    assert.deepEqual(patched.input.filter((item) => item.type === "compaction"), [checkpoint]);
+    assert.ok(patched.input.some((item) => item.type === "custom_tool_call_output" && item.call_id === "call_after"));
+    assert.equal(JSON.stringify(patched).includes("OpenAI Codex native compaction history"), false);
+    assert.equal(JSON.stringify(patched).includes("Synthetic user turn"), false);
     assert.equal(requests, 0);
     compactionExtension(pi);
     pi.registerCommand("compaction-compatibility-passed", { description: "Offline regression probe", handler: async () => {} });

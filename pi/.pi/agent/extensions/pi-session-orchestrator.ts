@@ -251,18 +251,24 @@ export default function piSessionOrchestrator(pi: ExtensionAPI) {
       const recent = children.filter((child) => !child.runtimes.length)
         .sort((a, b) => b.session.updatedAt - a.session.updatedAt).slice(0, 20);
       const selected = [...children.filter((child) => child.runtimes.length), ...recent];
-      const results = await Promise.allSettled(selected.map(async ({ session }) => {
-        const snapshot = await store.load(session.sessionPath, signal);
-        if (snapshot.session.parentSessionId !== parentId) return undefined;
-        const live = await runtimesFor(snapshot.session, signal, index);
-        const status = runtimeStatus(live);
-        return workerRow(snapshot, status, observedRun(snapshot, status).outcome);
-      }));
-      signal.throwIfAborted();
-      for (const result of results) {
-        if (result.status === "rejected" && (result.reason as NodeJS.ErrnoException)?.code !== "ENOENT") throw result.reason;
+      const rows: ReturnType<typeof workerRow>[] = [];
+      // A bounded row count is not a byte bound: twenty large transcripts can
+      // otherwise be inflated concurrently by a background widget refresh.
+      for (const { session } of selected) {
+        signal.throwIfAborted();
+        try {
+          const snapshot = await store.load(session.sessionPath, signal);
+          if (snapshot.session.parentSessionId !== parentId) continue;
+          const live = await runtimesFor(snapshot.session, signal, index);
+          const status = runtimeStatus(live);
+          rows.push(workerRow(snapshot, status, observedRun(snapshot, status).outcome));
+        } catch (error) {
+          signal.throwIfAborted();
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+        }
       }
-      return results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+      signal.throwIfAborted();
+      return rows;
     },
     open: async (parentId, path, reopen, signal) => withFileMutationQueue(path, async () => {
       const session = (await store.load(path, signal)).session;

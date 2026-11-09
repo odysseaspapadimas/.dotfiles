@@ -7,7 +7,12 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { SessionStore } from "../pi-sessions/store.ts";
 
 class CountingStore extends SessionStore {
+  metadataReads = 0;
   loads = 0;
+  protected override async loadMetadata(path: string, updatedAt: number, signal?: AbortSignal) {
+    this.metadataReads++;
+    return super.loadMetadata(path, updatedAt, signal);
+  }
   override async load(...args: Parameters<SessionStore["load"]>) {
     this.loads++;
     return super.load(...args);
@@ -31,9 +36,11 @@ test("fresh stores reuse metadata without parsing transcripts; direct reads stil
     const before = await readFile(path, "utf8");
     const initial = new CountingStore(root, index);
     const expected = await initial.list();
-    assert.equal(initial.loads, 1);
+    assert.equal(initial.metadataReads, 1);
+    assert.equal(initial.loads, 0, "cold catalogue reads do not inflate a transcript");
     const fresh = new CountingStore(root, index);
     assert.deepEqual(await fresh.list(), expected);
+    assert.equal(fresh.metadataReads, 0);
     assert.equal(fresh.loads, 0);
     assert.equal((await stat(index)).mode & 0o777, 0o600);
     const saved = JSON.parse(await readFile(index, "utf8"));
@@ -52,7 +59,8 @@ test("appends, replacements, deletions and explicit clear invalidate persisted m
       timestamp: new Date().toISOString(), name: "Renamed!" }) + "\n");
     const appended = new CountingStore(root, index);
     assert.equal((await appended.list())[0].name, "Renamed!");
-    assert.equal(appended.loads, 1);
+    assert.equal(appended.metadataReads, 1);
+    assert.equal(appended.loads, 0);
     const previous = await stat(path);
     const replacement = (await readFile(path, "utf8")).replace("Renamed!", "Replaced");
     await writeFile(path + ".replacement", replacement);
@@ -60,10 +68,11 @@ test("appends, replacements, deletions and explicit clear invalidate persisted m
     await rename(path + ".replacement", path);
     const replaced = new CountingStore(root, index);
     assert.equal((await replaced.list())[0].name, "Replaced");
-    assert.equal(replaced.loads, 1, "same-sized replacement with restored mtime has a different identity");
+    assert.equal(replaced.metadataReads, 1, "same-sized replacement with restored mtime has a different identity");
     replaced.clear();
     await replaced.list();
-    assert.equal(replaced.loads, 2);
+    assert.equal(replaced.metadataReads, 2);
+    assert.equal(replaced.loads, 0);
     await rm(path);
     assert.deepEqual(await new SessionStore(root, index).list(), []);
     assert.equal(JSON.parse(await readFile(index, "utf8")).entries.length, 0);
@@ -80,11 +89,13 @@ test("new files and concurrent writers preserve a complete usable index", async 
     const results = await Promise.all([first.list(), second.list()]);
     assert.equal(results[0].length, 2);
     assert.deepEqual(results[0], results[1]);
-    assert.ok(first.loads <= 1 && second.loads <= 1, "only the newly added session needs parsing");
-    assert.ok(first.loads + second.loads >= 1);
+    assert.ok(first.metadataReads <= 1 && second.metadataReads <= 1, "only the newly added session needs parsing");
+    assert.ok(first.metadataReads + second.metadataReads >= 1);
+    assert.equal(first.loads + second.loads, 0);
     const fresh = new CountingStore(root, index);
     assert.equal((await fresh.list()).length, 2);
-    assert.equal(fresh.loads, 0, "concurrent atomic writes leave a usable index");
+    assert.equal(fresh.metadataReads, 0, "concurrent atomic writes leave a usable index");
+    assert.equal(fresh.loads, 0);
   });
 });
 
@@ -98,7 +109,8 @@ test("corrupt, incompatible and invalid indexes rebuild; unwritable caching is o
       await writeFile(index, content);
       const store = new CountingStore(root, index);
       assert.equal((await store.list())[0].name, "Original");
-      assert.equal(store.loads, 1);
+      assert.equal(store.metadataReads, 1);
+      assert.equal(store.loads, 0);
     }
     const unavailable = new CountingStore(root, join(path, "index.json"));
     assert.equal((await unavailable.list()).length, 1, "a cache write failure does not fail listing");

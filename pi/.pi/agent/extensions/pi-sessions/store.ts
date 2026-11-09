@@ -1,5 +1,7 @@
-import { SessionManager, parseSessionEntries } from "@earendil-works/pi-coding-agent";
+import { SessionManager, parseSessionEntries, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -87,6 +89,81 @@ export async function canonicalPath(path: string): Promise<string> {
     try { return join(await realpath(dirname(path)), basename(path)); }
     catch { return resolve(path); }
   }
+}
+
+/** A catalogue never needs message bodies, tool output, or compaction checkpoints. */
+function catalogueEntry(entry: SessionEntry): SessionEntry {
+  const base = { id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp };
+  switch (entry.type) {
+    case "model_change": return { ...base, type: entry.type, provider: entry.provider, modelId: entry.modelId };
+    case "thinking_level_change": return { ...base, type: entry.type, thinkingLevel: entry.thinkingLevel };
+    case "session_info": return { ...base, type: entry.type, name: entry.name };
+    case "custom":
+      if (entry.customType === METADATA_TYPE) return { ...base, type: entry.type, customType: entry.customType, data: entry.data };
+      break;
+    case "message":
+      // An assistant response updates the catalogue's physical model, just as
+      // load() does. Represent only that fact, not a fabricated message/usage.
+      if (entry.message.role === "assistant") return { ...base, type: "model_change",
+        provider: entry.message.provider, modelId: entry.message.model };
+      break;
+  }
+  // Preserve every ancestry edge, including discarded tool/summary entries.
+  // Native SessionManager, not a second tree implementation, resolves branches.
+  return { ...base, type: "custom", customType: "pi-catalogue-ancestry" };
+}
+
+async function catalogueManager(path: string, signal?: AbortSignal): Promise<SessionManager | undefined> {
+  const stream = createReadStream(path, { encoding: "utf8", signal });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  const entries: (SessionHeader | SessionEntry)[] = [];
+  let header: SessionHeader | undefined;
+  try {
+    for await (const line of lines) {
+      signal?.throwIfAborted();
+      if (!line.trim()) continue;
+      let entry: SessionHeader | SessionEntry;
+      try { entry = JSON.parse(line); } catch { continue; } // Match native malformed-line handling.
+      if (!header) {
+        if (entry?.type !== "session" || typeof entry.id !== "string" ||
+          typeof entry.cwd !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) {
+          throw new Error(`Invalid Pi session: ${path}`);
+        }
+        // Legacy versions need Pi's complete migration, not a lossy projection.
+        if (entry.version !== 3) return undefined;
+        header = entry;
+      }
+      entries.push(entry.type === "session" ? entry : catalogueEntry(entry));
+    }
+    signal?.throwIfAborted();
+    if (!header) throw new Error(`Invalid Pi session: ${path}`);
+    return SessionManager.inMemory(header.cwd, undefined, entries);
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+}
+
+function sessionMetadata(manager: SessionManager, path: string, updatedAt: number): ManagedSession {
+  const header = manager.getHeader()!;
+  const metadata = metadataFor(manager);
+  let provider = metadata?.initialProvider;
+  let model = metadata?.initialModel;
+  let thinking = metadata?.initialThinking;
+  for (const entry of manager.getBranch()) {
+    if (entry.type === "model_change") { provider = entry.provider; model = entry.modelId; }
+    if (entry.type === "thinking_level_change") thinking = entry.thinkingLevel;
+    if (entry.type === "message" && entry.message.role === "assistant") {
+      provider = entry.message.provider; model = entry.message.model;
+    }
+  }
+  const createdAt = metadata?.createdAt ?? Date.parse(header.timestamp);
+  return { id: metadata?.id ?? header.id, sessionId: header.id, sessionPath: path,
+    name: manager.getSessionName() || `${header.cwd || "Pi session"} · ${new Date(createdAt).toISOString()}`,
+    cwd: header.cwd, createdAt, updatedAt, provider, model, thinking,
+    lifecycle: metadata?.lifecycle === "task" ? "task" : "persistent",
+    origin: metadata ? "created" : "historical", orchestrated: Boolean(metadata),
+    parentSessionId: metadata?.parentSessionId };
 }
 
 const INDEX_VERSION = 1;
@@ -195,18 +272,11 @@ export class SessionStore {
     // inMemory performs legacy migrations in memory; recall never rewrites historical files.
     const manager = SessionManager.inMemory(sourceHeader.cwd, undefined, entries);
     const header = manager.getHeader()!;
-    const metadata = metadataFor(manager);
     const branch = manager.getBranch();
-    let provider = metadata?.initialProvider;
-    let model = metadata?.initialModel;
-    let thinking = metadata?.initialThinking;
     const messages: TranscriptEntry[] = [];
     for (const entry of branch) {
-      if (entry.type === "model_change") { provider = entry.provider; model = entry.modelId; }
-      if (entry.type === "thinking_level_change") thinking = entry.thinkingLevel;
       if (entry.type === "message") {
         const message = entry.message;
-        if (message.role === "assistant") { provider = message.provider; model = message.model; }
         if (message.role !== "user" && message.role !== "assistant") continue;
         // Keep empty assistant messages too: tool-use/errors must not look like final answers.
         messages.push({ id: entry.id, role: message.role, text: textContent(message.content),
@@ -224,22 +294,18 @@ export class SessionStore {
       return data?.sessionId === header.id && typeof data.userEntryId === "string" &&
         typeof data.assistantEntryId === "string" && ["completed", "failed", "aborted"].includes(data.outcome) ? [data] : [];
     });
-    const createdAt = metadata?.createdAt ?? Date.parse(header.timestamp);
     const value: SessionSnapshot = {
-      session: { id: metadata?.id ?? header.id, sessionId: header.id, sessionPath: path,
-        name: manager.getSessionName() || `${header.cwd || "Pi session"} · ${new Date(createdAt).toISOString()}`,
-        cwd: header.cwd, createdAt, updatedAt: info.mtimeMs, provider, model, thinking,
-        lifecycle: metadata?.lifecycle === "task" ? "task" : "persistent",
-        origin: metadata ? "created" : "historical", orchestrated: Boolean(metadata),
-        parentSessionId: metadata?.parentSessionId },
+      session: sessionMetadata(manager, path, info.mtimeMs),
       messages, settled,
       userEntryIds: new Set(messages.filter((entry) => entry.role === "user").map((entry) => entry.id)),
     };
     this.catalogue.set(path, { stamp, session: value.session });
     this.revision++;
     if (previous) { this.bytes -= previous.bytes; this.cache.delete(path); }
-    // Bound retained transcript memory. Large sessions are still searchable, just not cached.
-    const bytes = messages.reduce((sum, entry) => sum + entry.text.length * 2 + 160, 0);
+    // Parsed/sliced strings can retain the source JSON backing store even when
+    // the visible projection is tiny. Charge both, not just assistant text.
+    // Large sessions remain searchable; they simply do not enter the LRU.
+    const bytes = info.size * 2 + messages.reduce((sum, entry) => sum + entry.text.length * 2 + 160, 0);
     if (bytes <= 32 * 1024 * 1024) {
       this.cache.set(path, { stamp, value, bytes });
       this.bytes += bytes;
@@ -273,15 +339,30 @@ export class SessionStore {
     }
   }
 
+  protected async loadMetadata(path: string, updatedAt: number, signal?: AbortSignal): Promise<ManagedSession> {
+    const manager = await catalogueManager(path, signal);
+    return manager ? sessionMetadata(manager, path, updatedAt) : (await this.load(path, signal)).session;
+  }
+
   async list(signal?: AbortSignal): Promise<ManagedSession[]> {
     await this.ensureIndex();
     signal?.throwIfAborted();
     const sessions: ManagedSession[] = [];
     for await (const path of this.paths(signal)) {
       try {
-        const { stamp } = await this.stamp(path);
+        const { info, stamp } = await this.stamp(path);
         const previous = this.catalogue.get(path);
-        sessions.push(previous?.stamp === stamp ? previous.session : (await this.load(path, signal)).session);
+        if (previous?.stamp === stamp) sessions.push(previous.session);
+        else {
+          // Background subagent widgets in every open Pi call list(). Never
+          // inflate entire changed transcripts (including unrelated sessions)
+          // or populate the transcript LRU just to discover names/identities.
+          const session = await this.loadMetadata(path, info.mtimeMs, signal);
+          signal?.throwIfAborted();
+          this.catalogue.set(path, { stamp, session });
+          this.revision++;
+          sessions.push(session);
+        }
       } catch { signal?.throwIfAborted(); }
     }
     signal?.throwIfAborted();

@@ -21,9 +21,12 @@ import {
 	modelKey,
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
+	replaceCheckpointedMessages,
 	resolveCodexResponsesUrl,
 	resolvePublicResponsesUrl,
+	spliceCheckpointHistory,
 	stripInputFromPayload,
+	usableNativeCheckpoint,
 	type JsonObject,
 	type NativeCompactionDetails,
 	type ResponseItem,
@@ -39,6 +42,12 @@ type CompactionStatus = {
 	error?: string;
 };
 
+type PendingCheckpoint = {
+	sessionId: string;
+	entryId: string;
+	marker: string;
+};
+
 type LegacyCompactionState = {
 	sessionId: string;
 	phase: "armed" | "compacting" | "compacted";
@@ -47,6 +56,8 @@ type LegacyCompactionState = {
 
 const COMPACTION_STATUS_KIND = "openai-codex-compaction-status";
 const PI_MID_RUN_COMPACTION_MIN_VERSION = "0.84.4";
+// First Pi with context_with_system, which lets Pi serialize tools and instructions around the checkpoint.
+const PI_FULL_CONTEXT_MIN_VERSION = "0.87.0";
 const CONTINUATION_PROMPT = "Compaction completed. Continue.";
 
 function parseVersion(version: string): [number, number, number] | undefined {
@@ -55,14 +66,18 @@ function parseVersion(version: string): [number, number, number] | undefined {
 	return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
-export function needsLegacyCompactionFallback(hostVersion: string): boolean {
+function isVersionBefore(hostVersion: string, minVersion: string): boolean {
 	const host = parseVersion(hostVersion);
-	const fixed = parseVersion(PI_MID_RUN_COMPACTION_MIN_VERSION);
-	if (!host || !fixed) return false;
+	const min = parseVersion(minVersion);
+	if (!host || !min) return false;
 	for (let index = 0; index < host.length; index++) {
-		if (host[index]! !== fixed[index]!) return host[index]! < fixed[index]!;
+		if (host[index]! !== min[index]!) return host[index]! < min[index]!;
 	}
 	return false;
+}
+
+export function needsLegacyCompactionFallback(hostVersion: string): boolean {
+	return isVersionBefore(hostVersion, PI_MID_RUN_COMPACTION_MIN_VERSION);
 }
 
 function localMarker(): string {
@@ -89,7 +104,9 @@ function setFeatureHeader(headers: Record<string, string | null>): void {
 export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion = VERSION): void {
 	const payloadShapeBySession = new Map<string, CachedPayloadShape>();
 	const useLegacyFallback = needsLegacyCompactionFallback(hostVersion);
+	const hasFullContextHook = !isVersionBefore(hostVersion, PI_FULL_CONTEXT_MIN_VERSION);
 	let legacyCompaction: LegacyCompactionState | undefined;
+	let pendingCheckpoint: PendingCheckpoint | undefined;
 
 	pi.registerEntryRenderer<CompactionStatus>(COMPACTION_STATUS_KIND, (entry, _options, theme) => {
 		const data = entry.data;
@@ -175,22 +192,45 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 	pi.on("session_start", () => {
 		payloadShapeBySession.clear();
 		legacyCompaction = undefined;
+		pendingCheckpoint = undefined;
 	});
 	pi.on("session_shutdown", () => {
 		payloadShapeBySession.clear();
 		legacyCompaction = undefined;
+		pendingCheckpoint = undefined;
 	});
 	pi.on("model_select", (_event, ctx) => {
 		payloadShapeBySession.delete(ctx.sessionManager.getSessionId());
 		legacyCompaction = undefined;
+		pendingCheckpoint = undefined;
 	});
 
-	pi.on("context", (event, ctx) => {
-		const checkpoint = findNativeCheckpoint(ctx.sessionManager.getBranch() as SessionEntry[]);
-		if (checkpoint.status === "none") return undefined;
-		return {
-			messages: event.messages.filter((message) => message.role !== "compactionSummary"),
+	// Upstream 0.1.7 (#57): Pi serializes the request around a placeholder;
+	// before_provider_request swaps only that placeholder for the checkpoint.
+	pi.on("context_with_system", (event, ctx) => {
+		pendingCheckpoint = undefined;
+		if (!isNativeCompactionModel(ctx.model)) return undefined;
+		const branch = ctx.sessionManager.getBranch() as SessionEntry[];
+		const checkpoint = findNativeCheckpoint(branch);
+		if (checkpoint.status !== "valid") return undefined;
+
+		const checkpointIndex = checkpoint.checkpoint.entryIndex;
+		const entryIndex = new Map(branch.map((entry, index) => [entry.id, index]));
+		const covered = ctx.sessionManager.buildSessionProjection().entries
+			.filter((projected) => (entryIndex.get(projected.sourceEntry.id) ?? Infinity) <= checkpointIndex)
+			.flatMap((projected) => projected.messages);
+		const marker = `OpenAI Codex native compaction history (${randomUUID()}).`;
+		pendingCheckpoint = {
+			sessionId: ctx.sessionManager.getSessionId(),
+			entryId: checkpoint.checkpoint.entryId,
+			marker,
 		};
+		const placeholder = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: marker }],
+			timestamp: Date.parse(branch[checkpointIndex]!.timestamp),
+		};
+		return { messages: replaceCheckpointedMessages(event.messages, covered, placeholder) };
 	});
 
 	pi.on("before_provider_headers", (event, ctx) => {
@@ -225,15 +265,24 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 		payloadShapeBySession.set(sessionId, { modelKey: modelKey(model), payload: basePayload });
 
 		const branch = ctx.sessionManager.getBranch() as SessionEntry[];
-		const checkpoint = findNativeCheckpoint(branch);
 
 		try {
-			if (checkpoint.status === "none") return undefined;
-			const input = await effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
+			const checkpoint = usableNativeCheckpoint(branch, model);
+			if (!checkpoint) return undefined;
+			let input: ResponseItem[];
+			if (hasFullContextHook) {
+				const pending = pendingCheckpoint;
+				if (pending?.sessionId !== sessionId || pending.entryId !== checkpoint.entryId) {
+					throw new Error("Pi's context for this request does not include the native compaction checkpoint.");
+				}
+				input = spliceCheckpointHistory(event.payload.input, pending.marker, checkpoint.details.replacementHistory);
+			} else {
+				input = await effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
+			}
 			const payload: JsonObject = { ...event.payload, input };
-			// The inline checkpoint replaces the leading system message too.
-			// Supply the current prompt independently, as the Responses API allows.
-			if (isPublicOpenAIModel(model)) payload.instructions = ctx.getSystemPrompt();
+			// Modern Pi owns prompt/tool serialization. Only legacy hosts need
+			// the public Responses prompt restored independently.
+			if (!hasFullContextHook && isPublicOpenAIModel(model)) payload.instructions = ctx.getSystemPrompt();
 			delete payload.messages;
 			delete payload.previous_response_id;
 			return payload;

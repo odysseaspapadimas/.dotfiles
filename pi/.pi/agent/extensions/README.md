@@ -17,6 +17,21 @@ text(page.sessions.map(({ id, name, status }) => ({ id, name, status })));
 
 Delivery acceptance is not completion: retain the returned `messageId` and use it with status/watch. Only an `outcome` reports a settled observed run; queued delivery must not inherit the previous run’s outcome. Existing renderer details and readable output remain available, and failures still reject rather than returning apparent success.
 
+## Session-discovery memory safety
+
+Background subagent widgets poll the shared session catalogue in every open Pi.
+Catalogue discovery streams current-format JSONL and retains only metadata and
+ancestry, using native SessionManager branch resolution. It does not load full
+transcripts or populate the transcript LRU. Legacy files still use native,
+read-only in-memory migration. Explicit recall/read retain their complete history.
+
+The transcript LRU charges source JSON backing storage as well as projected text;
+large sessions are readable but not cached. Child-result previews load serially,
+not twenty full transcripts concurrently. No saved session is trimmed or rewritten.
+
+After updating, run `/reload` in existing Pi sessions when idle; newly opened
+sessions load the fix automatically. Old extension instances do not hot-patch.
+
 ## Response-time summary
 
 `response-time.ts` shows the model, elapsed run time, tool-call count, summed tool
