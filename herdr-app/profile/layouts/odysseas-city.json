@@ -1,0 +1,91 @@
+{
+  "id": "root",
+  "type": "column",
+  "preview": "mods/odysseas-city/preview.svg",
+  "titlebar": "none",
+  "traffic_lights": [16, 17],
+  "background": "canvas",
+  "children": [
+    {
+      "id": "city-command",
+      "type": "block",
+      "content": { "mod": "odysseas-city", "props": { "role": "bar" } },
+      "size": { "px": 52 },
+      "window_drag": true
+    },
+    {
+      "id": "sidebar",
+      "type": "block",
+      "content": { "mod": "odysseas-city" },
+      "size": { "weight": 1.05 },
+      "min": 170
+    },
+    {
+      "id": "city-work",
+      "type": "column",
+      "size": { "weight": 1.35 },
+      "min": 180,
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "size": { "px": 40 },
+          "window_drag": true,
+          "content": { "mod": "tabs" }
+        },
+        {
+          "id": "city-work-body",
+          "type": "row",
+          "padding": [4, 10],
+          "gap": 8,
+          "children": [
+            {
+              "id": "main",
+              "type": "block",
+              "content": {
+                "tab": "active",
+                "pane": {
+                  "header": { "content": { "mod": "odysseas-t3-pane" }, "height": 28, "position": "top", "reveal": "always" },
+                  "background": "background",
+                  "border": { "width": 1, "color": "border" },
+                  "focus": { "width": 1, "color": "accent" },
+                  "radius": 8,
+                  "gap": 8,
+                  "lone": true
+                }
+              }
+            },
+            {
+              "id": "panel",
+              "type": "column",
+              "hidden": true,
+              "size": { "px": 368 },
+              "min": 280,
+              "max": 900,
+              "children": [
+                {
+                  "id": "panel-body",
+                  "type": "stack",
+                  "active": "files",
+                  "children": [
+                    { "id": "files", "type": "block", "content": { "mod": "files" } },
+                    { "id": "changes", "type": "block", "content": { "mod": "changes" } }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status",
+      "type": "block",
+      "size": { "px": 28 },
+      "content": {
+        "mod": "odysseas-nav",
+        "props": { "prefixActions": { "odysseas-t3-chrome.sidebar": "odysseas-city.mode" } }
+      }
+    }
+  ]
+}

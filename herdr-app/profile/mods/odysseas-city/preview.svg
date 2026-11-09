@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <defs>
+    <linearGradient id="sky" x2="0" y2="1"><stop stop-color="#101121"/><stop offset="1" stop-color="#242239"/></linearGradient>
+    <pattern id="windows" width="28" height="24" patternUnits="userSpaceOnUse"><path d="M4 6h16v10H4z" fill="#8bd5ca" opacity=".7"/></pattern>
+    <pattern id="purple" width="28" height="24" patternUnits="userSpaceOnUse"><path d="M4 6h16v10H4z" fill="#c6a0f6" opacity=".6"/></pattern>
+  </defs>
+  <rect width="960" height="600" rx="12" fill="#181926"/>
+  <rect x="1" y="1" width="958" height="48" rx="10" fill="#24273a"/>
+  <g font-family="monospace" fill="#8bd5ca"><text x="20" y="31" font-weight="bold" font-size="18">NEON // CITY</text><text x="610" y="29" font-size="12">Overview   Work   Agents   Ports   T3</text></g>
+  <path d="M0 50h960v270H0z" fill="url(#sky)"/>
+  <circle cx="805" cy="102" r="27" fill="#c6a0f6" opacity=".12"/>
+  <path d="M0 240V190h40v-35h45v75h20V120h50v105h22v-67h38v85h30V160h50v80h31v-55h44v65h28v-93h45v70h25V110h37v112h30v-65h52v80h25V130h48v97h30v-60h55v73h36V125h40v110h30v-67h55v70h30v-42h45v55h30v-75h50v125H0z" fill="#363650" opacity=".6"/>
+  <g stroke="#8bd5ca" stroke-opacity=".5" fill="#1e2030"><path d="M32 151h152v127H32z"/><path d="M204 121h152v157H204z"/><path d="M376 165h152v113H376z"/></g>
+  <path d="M548 141h152v137H548z" fill="#1e2030" stroke="#c6a0f6" stroke-opacity=".6"/>
+  <g font-family="monospace" font-size="12" fill="#cad3f5"><text x="44" y="174">main // HQ</text><text x="216" y="144">ports-ui // WT</text><text x="388" y="188">worktree-ui</text><text x="560" y="164">feature // WT</text></g>
+  <path d="M44 188h128v65H44zM216 160h128v90H216zM388 201h128v52H388z" fill="url(#windows)"/>
+  <path d="M560 183h128v70H560z" fill="url(#purple)"/>
+  <path d="M276 121v-20m-5 0h10" stroke="#ee994f" stroke-width="3"/>
+  <circle cx="276" cy="99" r="4" fill="#ee994f"/>
+  <path d="M20 280h512m14 0h166" stroke="#8bd5ca" opacity=".7"/>
+  <g font-family="monospace" font-size="13" font-weight="bold"><text x="32" y="301" fill="#8bd5ca">.dotfiles // local</text><text x="548" y="301" fill="#c6a0f6">luca // debina</text></g>
+  <rect x="10" y="329" width="940" height="30" rx="4" fill="#24273a"/>
+  <text x="25" y="349" font-family="monospace" font-size="12" fill="#cad3f5">Terminals    Pi agent    +</text>
+  <rect x="10" y="369" width="940" height="194" rx="6" fill="#1e2030" stroke="#8bd5ca" stroke-opacity=".6"/>
+  <g font-family="monospace" font-size="13" fill="#a5adcb"><text x="25" y="395" fill="#8bd5ca">~/project/worktree</text><text x="25" y="423">Real terminals. Same agents. A different view.</text><text x="25" y="451">Projects become districts; checkouts become buildings.</text><text x="25" y="479">Click a neon window to enter its agent.</text></g>
+  <text x="20" y="585" font-family="monospace" font-size="11" fill="#8087a2">local                        Ctrl+Space → a  overview / work                        Ctrl+Space → ?  keys</text>
+</svg>

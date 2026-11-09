@@ -1,0 +1,8 @@
+{
+  "programs": {
+    "pi": {
+      "name": "Pi",
+      "run": ["pi"]
+    }
+  }
+}

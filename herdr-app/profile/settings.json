@@ -1,0 +1,12 @@
+{
+  "zoom": 1,
+  "font": "JetBrains Mono",
+  "font_size": 14,
+  "ui_font": "Geist",
+  "appearance": "dark",
+  "theme": "odysseas-macchiato",
+  "minimum_contrast": 1,
+  "sounds": {
+    "enabled": true
+  }
+}

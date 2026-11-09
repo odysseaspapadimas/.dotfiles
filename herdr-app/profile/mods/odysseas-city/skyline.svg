@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="440" viewBox="0 0 1800 440">
+<defs>
+ <linearGradient id="sky" x2="0" y2="1"><stop stop-color="#181926"/><stop offset="1" stop-color="#24273a"/></linearGradient>
+ <radialGradient id="halo"><stop stop-color="#c6a0f6" stop-opacity=".22"/><stop offset="1" stop-color="#c6a0f6" stop-opacity="0"/></radialGradient>
+ <linearGradient id="mist" x2="0" y2="1"><stop stop-color="#8bd5ca" stop-opacity="0"/><stop offset="1" stop-color="#8bd5ca" stop-opacity=".07"/></linearGradient>
+</defs>
+<path fill="url(#sky)" d="M0 0h1800v440H0z"/>
+<ellipse cx="1250" cy="160" rx="420" ry="210" fill="url(#halo)"/>
+<circle cx="1260" cy="110" r="61" fill="#c6a0f6" opacity=".13"/>
+<g stroke="#181926" stroke-width="5"><path d="M1199 99h122M1199 115h122M1205 131h110M1216 147h88"/></g>
+<g fill="#8bd5ca" opacity=".28"><circle cx="67" cy="47" r="1"/><circle cx="301" cy="82" r="1"/><circle cx="556" cy="39" r="1.4"/><circle cx="835" cy="97" r="1"/><circle cx="1013" cy="31" r="1"/><circle cx="1480" cy="49" r="1.4"/><circle cx="1716" cy="93" r="1"/></g>
+<path fill="#1e2030" d="M0 270h48v-86h40v75h25v-50h70v61h38V134h56v-30h12v30h31v145h33V196h66v56h38v-92h70v98h26v-53h93v77h35V120h40v-47h7v47h35v162h29v-86h79v70h39v-111h45v-31h16v31h34v123h41v-72h53v71h22v-49h67v51h38v-111h53v-30h9v30h25v98h43v-63h86v52h25v-93h47v76h37v-141h33v-15h10v15h24v145h43v-80h71v89h25v-45h76v45h37v-91h65v98h43V132h57v-24h11v24h38v146h43v-68h88v75h43V192h36v-28h13v28h29v90h46v158H0z"/>
+<g stroke="#8bd5ca" stroke-opacity=".16" stroke-width="2"><path d="M233 161h31m-31 14h31m-31 14h31M615 151h21m-21 14h21m-21 14h21M1006 186h27m-27 14h27M1425 207h31m-31 14h31M1652 147h27m-27 14h27"/></g>
+<g stroke="#c6a0f6" stroke-opacity=".2" stroke-width="2"><path d="M1308 142h16v54h-16zM477 177h18v61h-18zM751 208h21m-21 14h21"/></g>
+<path fill="url(#mist)" d="M0 275h1800v165H0z"/>
+<g stroke="#8bd5ca" stroke-opacity=".08"><path d="M0 368h1800M0 391h1800M0 421h1800M900 335L0 440m900-105L300 440m600-105L600 440m300-105v105m0-105l300 105m-300-105l600 105m-600-105l900 105"/></g>
+<path stroke="#c6a0f6" stroke-opacity=".3" d="M0 337h1800"/>
+</svg>

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Sync preferences only; the app binary and runtime state remain machine-local.
+set -euo pipefail
+python="${HERDR_PROFILE_PYTHON:-python3}"
+profile="$HOME/.local/share/herdr-profile/profile.py"
+if ! "$python" "$profile" sync; then
+  if [[ ! -f "$HOME/.local/state/herdr-profile/last-sync.json" ]]; then
+    echo 'Herdr: no successfully synced profile; fix SSH to Debina first.' >&2
+    exit 1
+  fi
+  echo 'Herdr: Debina unavailable; using the last successfully synced profile.' >&2
+fi
+
+if [[ $(hostname -s) != debina ]]; then
+  machines=$("$HOME/.local/bin/hc" machine ls --json)
+  if ! "$python" -c 'import json,sys; d=json.load(sys.stdin); sys.exit(not any(m["name"]=="debina" for m in d["machines"]))' <<<"$machines"; then
+    "$HOME/.local/bin/hc" machine add debina --name debina
+  fi
+fi
+exec "$HOME/.local/share/herdr-app/herdr-app" "$@"

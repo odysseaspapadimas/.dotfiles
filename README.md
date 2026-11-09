@@ -35,6 +35,12 @@ The Git remote is the source of shared dotfiles. Commit/push intentional changes
 
 Portd defaults to Debina on both Omarchy and macOS. Machine-local systemd overrides remain outside this repository, and pulling dotfiles does not rebuild Portd or restart it. For the Mac rebuild/reload steps, see [macOS services](macos/README.md#update-portd).
 
+## Herdr desktop app
+
+The new app uses the [shared Herdr profile](herdr-app/README.md), separate from the older TUI configuration. Open **Herdr (Debina)** or run `herdr-start` on Omarchy/Windows: it fetches allowlisted keys, styling, and personal layouts/mods from `~/.dotfiles/herdr-app/profile/` on Debina before opening the local client. Agents and terminals remain on Debina. Saved profile edits publish over SSH without pulling the whole repository; commit them separately for history. Runtime/window state and SSH credentials remain machine-local.
+
+Install the Linux launcher with `bash ~/.dotfiles/herdr-app/install.sh`; Windows has a native PowerShell installer under `herdr-app/windows/`. The old `herdr-w` command remains available for existing TUI sessions.
+
 ## Packages
 
 - `shell` — Fish, Starship, `dot`, and `herdr-w`.
