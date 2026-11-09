@@ -403,7 +403,15 @@ for (const hostVersion of ["1.4.0", "1.5.0"]) {
         assert.equal(before.tools, undefined, "exercise inline additional_tools, not a top-level tools array");
         const markerIndex = before.input.findIndex((item: ResponseItem) => item.role === "user" && JSON.stringify(item.content).includes("OpenAI Codex native compaction history"));
         assert.ok(markerIndex >= 0);
-        assert.deepEqual(payload, { ...before, input: [...before.input.slice(0, markerIndex), ...history, ...before.input.slice(markerIndex + 1)] });
+        const prefix = before.input.slice(0, markerIndex);
+        const tail = before.input.slice(markerIndex + 1);
+        const expectedInput = model.provider === "openai" ? [...history, ...prefix, ...tail] : [...prefix, ...history, ...tail];
+        assert.deepEqual(payload, { ...before, input: expectedInput });
+        if (model.provider === "openai") {
+          assert.equal(payload.input[0].type, "compaction");
+          assert.ok(payload.input.findIndex((item: ResponseItem) => item.type === "additional_tools") > 0,
+            "public declarations must survive the checkpoint's tool-state reset");
+        }
         assert.ok(before.input.some((item: ResponseItem) => item.type === "additional_tools"));
         assert.ok(before.input.some((item: ResponseItem) => JSON.stringify(item).includes("no longer available")));
         assert.ok(payload.input.some((item: ResponseItem) => item.type === "custom_tool_call" && item.input === "probe"));
@@ -443,9 +451,26 @@ test("placeholder helpers keep system updates and queued messages without mutati
   assert.deepEqual(history, [checkpoint()]);
   assert.throws(() => spliceCheckpointHistory([], "MARKER", history), /Could not place/);
   assert.throws(() => spliceCheckpointHistory([...input, ...input], "MARKER", history), /Could not place/);
+  const declaration = { type: "additional_tools", role: "developer", tools: [{ name: "probe" }] };
+  const promptPatch = { role: "developer", content: "Current rules" };
+  const config = { type: "configuration_update", reasoning: { effort: "low" } };
+  const after = { role: "user", content: "Tail turn" };
+  const original = [declaration, promptPatch, config, ...input, after];
+  assert.deepEqual(spliceCheckpointHistory(original, "MARKER", history, { replayPrefixAfterCheckpoint: true }),
+    [...history, declaration, promptPatch, config, after]);
+  assert.deepEqual(original, [declaration, promptPatch, config, ...input, after]);
+  const rolelessDeclaration = { type: "additional_tools", tools: declaration.tools };
+  assert.deepEqual(spliceCheckpointHistory([rolelessDeclaration, ...input], "MARKER", history, { replayPrefixAfterCheckpoint: true }),
+    [...history, rolelessDeclaration]);
+  for (const unsafe of [{ role: "user", content: "Earlier turn" }, { type: "function_call", name: "probe" },
+    { type: "function_call", role: "developer", name: "probe" }, { type: "additional_tools", tools: "invalid" },
+    { type: "compaction", encrypted_content: "unexpected" }]) {
+    assert.throws(() => spliceCheckpointHistory([unsafe, ...input], "MARKER", history, { replayPrefixAfterCheckpoint: true }), /Cannot safely replay/);
+  }
+  assert.throws(() => spliceCheckpointHistory(input, "MARKER", [{ role: "user", content: "Not a public checkpoint" }], { replayPrefixAfterCheckpoint: true }), /Cannot safely replay/);
 });
 
-for (const failure of ["missing", "duplicate", "stale branch", "reset"] as const) {
+for (const failure of ["missing", "duplicate", "stale branch", "reset", "unsafe prefix"] as const) {
   test(`live checkpoint replay fails closed when its placeholder is ${failure}`, async () => {
     const h = harness();
     h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details());
@@ -454,6 +479,7 @@ for (const failure of ["missing", "duplicate", "stale branch", "reset"] as const
     if (failure === "duplicate") before.input.push(before.input.find((item: ResponseItem) => item.role === "user"));
     if (failure === "stale branch") h.session.appendCustomEntry(NATIVE_COMPACTION_KIND, details(publicModel, [checkpoint("other")]));
     if (failure === "reset") h.handlers.get("session_start")!({}, h.ctx);
+    if (failure === "unsafe prefix") before.input.unshift({ role: "user", content: "Unexpected conversation before placeholder" });
     before.previous_response_id = "stale";
     const payload = await h.handlers.get("before_provider_request")!({ payload: before }, h.ctx);
     assert.equal(h.aborted(), true);

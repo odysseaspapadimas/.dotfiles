@@ -94,6 +94,8 @@ export default async function (pi) {
     assert.deepEqual(patched.input.filter((item) => item.type === "additional_tools"),
       original.input.filter((item) => item.type === "additional_tools"));
     assert.deepEqual(patched.input.filter((item) => item.type === "compaction"), [checkpoint]);
+    assert.equal(patched.input[0].type, "compaction", "public checkpoint must precede Pi's callable declarations");
+    assert.ok(patched.input.findIndex((item) => item.type === "additional_tools") > 0);
     assert.ok(patched.input.some((item) => item.type === "custom_tool_call_output" && item.call_id === "call_after"));
     assert.equal(JSON.stringify(patched).includes("OpenAI Codex native compaction history"), false);
     assert.equal(JSON.stringify(patched).includes("Synthetic user turn"), false);

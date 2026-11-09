@@ -387,8 +387,17 @@ export function replaceCheckpointedMessages<T extends { role: string }>(
 	return result;
 }
 
-/** Swaps the serialized placeholder for the checkpoint history, leaving Pi's other items untouched. */
-export function spliceCheckpointHistory(input: unknown, marker: string, history: ResponseItem[]): ResponseItem[] {
+/**
+ * Swaps the serialized placeholder for checkpoint history without rebuilding Pi's items.
+ * Public OpenAI checkpoints reset in-band tool state, so their serialized system prefix
+ * must follow the checkpoint. Codex keeps upstream's in-place placement.
+ */
+export function spliceCheckpointHistory(
+	input: unknown,
+	marker: string,
+	history: ResponseItem[],
+	options: { replayPrefixAfterCheckpoint?: boolean } = {},
+): ResponseItem[] {
 	const placeholder = { role: "user", content: [{ type: "input_text", text: marker }] };
 	const items = Array.isArray(input) ? input as ResponseItem[] : [];
 	const matches = items.flatMap((item, index) => isDeepStrictEqual(item, placeholder) ? [index] : []);
@@ -396,7 +405,24 @@ export function spliceCheckpointHistory(input: unknown, marker: string, history:
 		throw new Error("Could not place the OpenAI Codex native compaction checkpoint in Pi's request.");
 	}
 	const index = matches[0]!;
-	return [...items.slice(0, index), ...history.map(cloneItem), ...items.slice(index + 1)];
+	const prefix = items.slice(0, index);
+	const replacement = history.map(cloneItem);
+	const tail = items.slice(index + 1);
+	if (options.replayPrefixAfterCheckpoint) {
+		// Only system/configuration items may move across the checkpoint. Never
+		// silently reorder conversation or tool-call history from another hook.
+		const isSystemItem = (item: ResponseItem): boolean => {
+			if (item.role !== undefined && item.role !== "developer" && item.role !== "system") return false;
+			if (item.type === "additional_tools") return Array.isArray(item.tools);
+			if (item.type === "configuration_update") return true;
+			return (item.type === undefined || item.type === "message") && (item.role === "developer" || item.role === "system");
+		};
+		if (history[0]?.type !== "compaction" || prefix.some((item) => !isSystemItem(item))) {
+			throw new Error("Cannot safely replay Pi's system prefix after the public OpenAI checkpoint.");
+		}
+		return [...replacement, ...prefix, ...tail];
+	}
+	return [...prefix, ...replacement, ...tail];
 }
 
 /** The latest native checkpoint on the branch, or undefined; throws if it cannot be replayed for this model. */

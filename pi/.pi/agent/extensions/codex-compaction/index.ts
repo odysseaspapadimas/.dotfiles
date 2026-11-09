@@ -275,7 +275,11 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 				if (pending?.sessionId !== sessionId || pending.entryId !== checkpoint.entryId) {
 					throw new Error("Pi's context for this request does not include the native compaction checkpoint.");
 				}
-				input = spliceCheckpointHistory(event.payload.input, pending.marker, checkpoint.details.replacementHistory);
+				input = spliceCheckpointHistory(event.payload.input, pending.marker, checkpoint.details.replacementHistory, {
+					// Unlike Codex, public inline checkpoints reset callable tool state.
+					// Preserve Pi's serialized prefix, but replay it AFTER the checkpoint.
+					replayPrefixAfterCheckpoint: isPublicOpenAIModel(model),
+				});
 			} else {
 				input = await effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
 			}
