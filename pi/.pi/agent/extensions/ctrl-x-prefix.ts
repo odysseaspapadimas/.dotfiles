@@ -22,6 +22,7 @@ type ComposerAction = "edit" | "undo" | "copy" | "cut";
 type LeaderCommand =
   | { label: string; composerAction: ComposerAction }
   | { label: string; action: AppKeybinding }
+  | { label: string; event: string }
   | { label: string; command: string; preserveDraft?: boolean; useDraftAsArgs?: boolean };
 
 const LEADER_COMMANDS: Record<string, LeaderCommand> = {
@@ -38,6 +39,7 @@ const LEADER_COMMANDS: Record<string, LeaderCommand> = {
   t: { label: "tree", action: "app.session.tree" },
   n: { label: "new", action: "app.session.new" },
   a: { label: "subagents", command: "/subagents", preserveDraft: true },
+  p: { label: "next steps", event: "next-steps:pick" },
   h: { label: "toggle subagents", command: "/subagents-toggle", preserveDraft: true },
   "shift+h": { label: "share", command: "/share", preserveDraft: true },
   o: { label: "quota", command: "/codex-quota", preserveDraft: true },
@@ -71,7 +73,7 @@ function buildHelpLines(theme: Theme, width: number): string[] {
     `${theme.fg("muted", "Composer")} ${item("e", "edit last")}  ${item("Backspace", "undo")}  ${item("y", "copy")}  ${item("x", "cut")}`,
     `${theme.fg("muted", "Pi      ")} ${item("m", "model")}  ${item("s", "settings")}  ${item("r", "reload")}`,
     `${theme.fg("muted", "Project ")} ${item("d", "diff")}  ${item("f", "view")}  ${item("z", "restore")}`,
-    `${theme.fg("muted", "Agents  ")} ${item("a", "picker")}  ${item("h", "hide/show tree")}`,
+    `${theme.fg("muted", "Agents  ")} ${item("a", "picker")}  ${item("h", "hide/show tree")}  ${item("p", "next steps")}`,
     `${theme.fg("muted", "Other   ")} ${item("b", "side")}  ${item("c", "copy")}  ${item("H", "share")}  ${item("o", "quota")}  ${item("i", "login")}`,
     `${theme.fg("muted", "Side    ")} ${item("j", "summary handoff")}  ${item("J", "full handoff")}`,
     `${theme.fg("muted", "Help    ")} ${item("?", "show this window")}  ${label("Esc/Enter closes")}`,
@@ -260,6 +262,11 @@ export default function ctrlXPrefix(pi: ExtensionAPI) {
           } else {
             ctx.ui.notify(`${command.label} is not available`, "warning");
           }
+          return;
+        }
+
+        if ("event" in command) {
+          pi.events.emit(command.event, undefined);
           return;
         }
 

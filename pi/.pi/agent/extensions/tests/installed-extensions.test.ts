@@ -42,7 +42,7 @@ test("all configured extensions load and complete the installed Pi lifecycle", a
     await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
     const runner = session.extensionRunner;
     assert.deepEqual(runner.getCommandDiagnostics(), []);
-    for (const name of ["fast", "context", "skills", "side", "view", "codex-review", "diff", "checkpoints"]) assert.ok(runner.getCommand(name), name);
+    for (const name of ["fast", "context", "skills", "side", "view", "codex-review", "diff", "checkpoints", "next-steps"]) assert.ok(runner.getCommand(name), name);
     assert.equal(runner.getCommand("activity"), undefined, "response timing should be summary-only");
     for (const name of ["pi_sessions", "ask_user_question", "web_enable"]) assert.ok(runner.getToolDefinition(name), name);
     // Optional packages such as todo are machine-local preferences, not a

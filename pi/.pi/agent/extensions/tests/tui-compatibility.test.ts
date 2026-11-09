@@ -23,6 +23,7 @@ test("Ctrl+X chords work with Pi 1.0's CustomEditor and preserve drafts", async 
   let copied = 0;
   let helpClosed = false;
   const submitted: string[] = [];
+  const emitted: string[] = [];
   const tui = { terminal: { rows: 40, columns: 100 }, requestRender() {} };
   const ctx = { mode: "tui", ui: { theme, notify() {}, getEditorComponent: () => undefined,
     setEditorComponent: (factory: any) => { editor = factory(tui, { borderColor: (value: string) => value, selectList: {} }, { matches: () => false }); },
@@ -33,7 +34,7 @@ test("Ctrl+X chords work with Pi 1.0's CustomEditor and preserve drafts", async 
     },
   } };
   ctrlX({ on: (name: string, handler: any) => handlers.set(name, handler),
-    registerCommand() {},
+    registerCommand() {}, events: { emit: (name: string) => emitted.push(name) },
   } as unknown as ExtensionAPI);
   handlers.get("session_start")({}, ctx);
   editor.actionHandlers.set("app.message.copy", () => copied++);
@@ -52,6 +53,11 @@ test("Ctrl+X chords work with Pi 1.0's CustomEditor and preserve drafts", async 
       assert.equal(submitted.at(-1), command);
       assert.equal(editor.getText(), "Keep this draft", `${key} must preserve the draft`);
     }
+    const submissions = submitted.length;
+    editor.handleInput("\x18"); editor.handleInput("p");
+    assert.deepEqual(emitted, ["next-steps:pick"]);
+    assert.equal(submitted.length, submissions, "next-step picker must not submit the editor");
+    assert.equal(editor.getText(), "Keep this draft");
     editor.handleInput("\x18"); editor.handleInput("?");
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(helpClosed, true);

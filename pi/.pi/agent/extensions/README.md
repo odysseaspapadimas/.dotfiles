@@ -44,6 +44,18 @@ Only counters and start timestamps for in-flight tools are retained. There is no
 Existing `turn-activity-v1` entries in older sessions are left untouched and ignored
 by this extension.
 
+## Next-step suggestions
+
+`next-steps/` offers up to three contextual follow-ups from the current chat model
+in its normal response, with no separate generation call. **Ctrl+X, then p** opens
+the picker; fullscreen also supports clicking a row. Picking inserts into the
+editor, asking to append or cancel if a draft exists. `/next-steps send 1` is an
+explicit immediate-send path; `/next-steps off` disables the feature for this
+session branch. It restores from the active session history, never revives older
+suggestions when the latest answer has none, and adds nothing to headless prompts.
+See [next-steps/README.md](next-steps/README.md) for controls and token/history details.
+Requires Pi 1.5.0+; `/reload` when idle enables it for the next response.
+
 ## Compatibility checks
 
 Run against the **currently installed Pi**, including its host-provided modules:
@@ -54,7 +66,9 @@ npm test
 npm run typecheck
 ```
 
-The test/typecheck tooling uses the existing development dependencies in `changed-files-ledger/node_modules`. If they are missing, run `npm --prefix changed-files-ledger ci` first. Override host discovery with `PI_TEST_HOST=/path/to/pi-coding-agent` if `pi` is not on `PATH`.
+The test/typecheck tooling uses the existing development dependencies in `changed-files-ledger/node_modules`. If they are missing, run `npm --prefix changed-files-ledger ci` first. Override host discovery with `PI_TEST_HOST=/path/to/pi-coding-agent` if `pi` is not on `PATH`. A standalone
+bundled Pi has no importable SDK modules; in that case point `PI_TEST_HOST` at an
+npm-installed `node_modules/@earendil-works/pi-coding-agent` of the same version.
 
 The suite covers the ledger, session/mailbox orchestration, quota history, response-time summaries, Fast Mode, session-naming cancellation, side-chat native checkpoints, and narrow-terminal UI rendering. It also loads every configured local/npm extension using Pi's real loader and runs SDK lifecycle/command checks. That installed-extension check defaults to `~/.pi/agent`; override with `PI_TEST_AGENT_DIR`.
 
